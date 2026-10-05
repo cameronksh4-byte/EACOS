@@ -1,0 +1,262 @@
+{
+  "version": 1,
+  "sprint_days": 90,
+  "modules": [
+    {
+      "id": "M1",
+      "title": "Typed Data & Validation Schemas",
+      "domains": [
+        "python_data_structures",
+        "validation_schemas"
+      ],
+      "days": [
+        1,
+        14
+      ],
+      "why": "Every reliable AI system starts with a precise definition of 'correct output'. If you can't describe an invoice in types, no model can fill it in reliably.",
+      "objectives": [
+        "Use dicts, lists, sets, dataclasses and comprehensions fluently on document data",
+        "Model real business documents as Pydantic v2 schemas with Decimal money and ISO dates",
+        "Separate field validation (what's on the page) from audit rules (does it add up)",
+        "Read and act on a ValidationError"
+      ],
+      "concepts": [
+        "mutable default arguments",
+        "Decimal vs float for money",
+        "Pydantic lax vs strict mode",
+        "field_validator / model_validator",
+        "StrEnum",
+        "extra='forbid'"
+      ],
+      "code_along": [
+        {
+          "title": "Read the schemas",
+          "file": "auditgate/extraction/schemas.py",
+          "task": "Read Invoice, Bid and WorkOrder. Explain to yourself why audit() is a method and not a validator."
+        },
+        {
+          "title": "Break it on purpose",
+          "file": "(python REPL)",
+          "task": "uv run python -c \"from auditgate.extraction.schemas import Invoice; Invoice(vendor_name='', invoice_number='1', total='abc')\" - read every line of the ValidationError."
+        },
+        {
+          "title": "Add a rule",
+          "file": "auditgate/extraction/schemas.py",
+          "task": "Add an Invoice audit rule DUPLICATE_LINE that warns when two line items share a description and amount. Add a test for it."
+        },
+        {
+          "title": "Add a field",
+          "file": "auditgate/extraction/schemas.py",
+          "task": "Add an optional `po_number: str | None` to Invoice and teach HeuristicExtractor to read 'PO #:' lines."
+        }
+      ],
+      "checkpoint": "uv run pytest tests/test_pipeline.py -k m1 -q",
+      "milestone": "AuditGate can represent and audit invoices, bids and work orders without any AI at all.",
+      "stretch": "Add a fourth document type: Receipt (merchant, date, payment method last-4, total)."
+    },
+    {
+      "id": "M2",
+      "title": "LLM API Mechanics & Structured Outputs",
+      "domains": [
+        "api_mechanics"
+      ],
+      "days": [
+        15,
+        32
+      ],
+      "why": "Clients pay for answers they can trust. Structured outputs turn a chatty model into a function that returns a validated object - or fails loudly.",
+      "objectives": [
+        "Call OpenAI, Anthropic and a local Ollama model through one interface",
+        "Use instructor to get Pydantic objects back, with validation-driven retries",
+        "Handle rate limits, timeouts and token budgets",
+        "Write prompts that resist prompt injection inside documents"
+      ],
+      "concepts": [
+        "HTTP status codes (401/429/5xx)",
+        "temperature",
+        "JSON mode vs tool calling",
+        "instructor max_retries",
+        "OpenAI-compatible local servers",
+        "system prompt vs data delimiters"
+      ],
+      "code_along": [
+        {
+          "title": "Run a local model",
+          "file": ".env",
+          "task": "Install Ollama, `ollama pull llama3.1`, set AUDITGATE_PROVIDER=local, then run `uv run python -m auditgate.evals.runner --provider local`."
+        },
+        {
+          "title": "Trace a request",
+          "file": "auditgate/extraction/extractor.py",
+          "task": "Read LLMExtractor.extract. Identify the system prompt rule that defends against inv_prompt_injection."
+        },
+        {
+          "title": "Compare providers",
+          "file": "auditgate/evals/runner.py",
+          "task": "Run the eval for heuristic and one LLM provider with --report. Diff the two JSON reports and write down where each wins."
+        },
+        {
+          "title": "Add timing",
+          "file": "auditgate/pipeline.py",
+          "task": "Record extraction latency in AuditReport (a new `latency_ms` field) and show it in the UI."
+        }
+      ],
+      "checkpoint": "uv run pytest tests/test_pipeline.py -k m2 -q",
+      "milestone": "AuditGate can swap between offline, local-LLM and hosted-LLM extraction with one setting.",
+      "stretch": "Add a 'consensus' extractor that runs two backends and flags fields where they disagree."
+    },
+    {
+      "id": "M3",
+      "title": "Data Security & PII Sanitization",
+      "domains": [
+        "data_security"
+      ],
+      "days": [
+        33,
+        50
+      ],
+      "why": "This is the product's moat. Business owners don't fear AI - they fear their customers' bank details ending up in someone else's logs.",
+      "objectives": [
+        "Detect PII and financial identifiers with validated regexes (Luhn, SSN rules)",
+        "Implement reversible tokenization: sanitize -> extract -> rehydrate",
+        "Combine deterministic detection with optional spaCy NER for recall",
+        "Measure leakage instead of hoping"
+      ],
+      "concepts": [
+        "precision vs recall",
+        "Luhn checksum",
+        "label-anchored detection",
+        "overlap resolution",
+        "data minimisation",
+        "threat model: what leaves the machine?"
+      ],
+      "code_along": [
+        {
+          "title": "Read the sanitizer",
+          "file": "auditgate/security/sanitizer.py",
+          "task": "Follow one value from Detector -> _spans -> _resolve_overlaps -> Vault.token_for -> rehydrate."
+        },
+        {
+          "title": "Enable NER",
+          "file": ".env",
+          "task": "uv pip install en_core_web_sm (see README), then run the eval with --spacy and compare redaction counts."
+        },
+        {
+          "title": "Add a detector",
+          "file": "auditgate/security/sanitizer.py",
+          "task": "Add DRIVERS_LICENSE detection anchored on labels like 'DL #:' and add a golden-dataset case with it in pii_values."
+        },
+        {
+          "title": "Attack it",
+          "file": "auditgate/evals/golden_dataset.json",
+          "task": "Write a case designed to leak (e.g. a phone number written as 512 555 0147). Watch the eval fail, then fix the detector."
+        }
+      ],
+      "checkpoint": "uv run pytest tests/test_pipeline.py -k m3 -q",
+      "milestone": "No raw PII ever reaches an extraction backend, and the eval proves it on every run.",
+      "stretch": "Encrypt the Vault at rest with a per-session key so even local crash dumps are safe."
+    },
+    {
+      "id": "M4",
+      "title": "Agent Workflows & Orchestration",
+      "domains": [
+        "orchestration"
+      ],
+      "days": [
+        51,
+        70
+      ],
+      "why": "Real work is multi-step: load, clean, extract, verify, route to a human. Orchestration is where reliability is won or lost.",
+      "objectives": [
+        "Design a pipeline as explicit, testable stages with a typed report",
+        "Route outcomes (pass / review / fail) to humans with reasons",
+        "Expose the engine over a local FastAPI service",
+        "Process batches concurrently with bounded parallelism"
+      ],
+      "concepts": [
+        "pipelines vs agents",
+        "state objects",
+        "human-in-the-loop",
+        "idempotency",
+        "asyncio.gather & semaphores",
+        "step budgets"
+      ],
+      "code_along": [
+        {
+          "title": "Read the pipeline",
+          "file": "auditgate/pipeline.py",
+          "task": "Map each line of process_text to a stage. Where would you add a second-opinion step?"
+        },
+        {
+          "title": "Serve it",
+          "file": "auditgate/api.py",
+          "task": "uv run uvicorn auditgate.api:app --port 8000, then POST a golden-dataset document to /audit/text."
+        },
+        {
+          "title": "Batch mode",
+          "file": "auditgate/pipeline.py",
+          "task": "Add process_folder(path, concurrency=4) that audits every file in a folder and writes a summary CSV with pandas."
+        },
+        {
+          "title": "Escalation agent",
+          "file": "auditgate/pipeline.py",
+          "task": "When status is FAIL, draft (don't send) a polite query email to the vendor explaining each finding."
+        }
+      ],
+      "checkpoint": "uv run pytest tests/test_pipeline.py -k m4 -q",
+      "milestone": "AuditGate runs as a local service that can audit a folder of documents and route exceptions.",
+      "stretch": "Re-implement the pipeline as a LangGraph graph (see tutorials/langgraph) with a human approval interrupt."
+    },
+    {
+      "id": "M5",
+      "title": "Automated Evaluations & Shipping the MVP",
+      "domains": [
+        "evaluations"
+      ],
+      "days": [
+        71,
+        90
+      ],
+      "why": "'It worked on my demo' doesn't sell. A scored, repeatable eval is both your engineering safety net and your best sales asset.",
+      "objectives": [
+        "Build and grow a golden dataset of real edge cases",
+        "Gate releases on accuracy, schema adherence and zero PII leakage",
+        "Ship a polished local Streamlit dashboard",
+        "Package the pitch: privacy and reliability in plain language"
+      ],
+      "concepts": [
+        "golden datasets",
+        "regression gates",
+        "per-field accuracy",
+        "CI exit codes",
+        "demo-driven sales",
+        "pricing a local-first tool"
+      ],
+      "code_along": [
+        {
+          "title": "Run the gate",
+          "file": "auditgate/evals/runner.py",
+          "task": "uv run python -m auditgate.evals.runner --report eval_report.json and read every metric."
+        },
+        {
+          "title": "Grow the dataset",
+          "file": "auditgate/evals/golden_dataset.json",
+          "task": "Add 5 cases from (anonymised) real documents a prospect sends you. Keep the gate green."
+        },
+        {
+          "title": "Polish the UI",
+          "file": "auditgate/ui.py",
+          "task": "uv run streamlit run auditgate/ui.py - add a batch upload tab and an export-to-Excel button (openpyxl)."
+        },
+        {
+          "title": "Sell it",
+          "file": "sales_collateral/client_pitch.md",
+          "task": "Customise the pitch for one niche (e.g. property managers). Book three demos."
+        }
+      ],
+      "checkpoint": "uv run pytest tests/test_pipeline.py -k m5 -q",
+      "milestone": "A demo-ready, evaluated, local-first MVP and a pitch you can hand to a business owner.",
+      "stretch": "Add a GitHub Action that runs pytest + the eval runner on every push."
+    }
+  ]
+}

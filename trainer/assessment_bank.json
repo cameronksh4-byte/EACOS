@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "passing_threshold": 0.8,
+  "questions": [
+    {
+      "id": "PY1",
+      "domain": "python_data_structures",
+      "difficulty": 1,
+      "type": "code_output",
+      "prompt": "What does this print?",
+      "code": "docs = ['invoice', 'bid', 'invoice', 'invoice']\ncounts = {}\nfor d in docs:\n    counts[d] = counts.get(d, 0) + 1\nprint(counts)",
+      "options": {
+        "a": "{'invoice': 3, 'bid': 1}",
+        "b": "{'invoice': 1, 'bid': 1}",
+        "c": "KeyError",
+        "d": "{'invoice': 2, 'bid': 1}"
+      },
+      "answer": "a",
+      "explanation": "dict.get(key, 0) returns 0 for a missing key, so each doc type is counted. collections.Counter(docs) does the same in one line."
+    },
+    {
+      "id": "PY2",
+      "domain": "python_data_structures",
+      "difficulty": 3,
+      "type": "code_output",
+      "prompt": "A teammate writes this helper to collect redacted tokens. What is printed?",
+      "code": "def collect(token, found=[]):\n    found.append(token)\n    return found\n\nprint(collect('EMAIL_1'), end=' ')\nprint(collect('PHONE_1'))",
+      "options": {
+        "a": "['EMAIL_1'] ['PHONE_1']",
+        "b": "['EMAIL_1'] ['EMAIL_1', 'PHONE_1']",
+        "c": "[] []",
+        "d": "TypeError"
+      },
+      "answer": "b",
+      "explanation": "Default arguments are evaluated ONCE at function definition. The same list is shared across calls, so state leaks between documents - a real PII bug. Use `found=None` then `found = found or []`."
+    },
+    {
+      "id": "API1",
+      "domain": "api_mechanics",
+      "difficulty": 1,
+      "type": "mcq",
+      "prompt": "Your call to an LLM API returns HTTP 429. What is the correct client behaviour?",
+      "options": {
+        "a": "Immediately retry in a tight loop until it succeeds",
+        "b": "Treat it as a bad API key and stop",
+        "c": "Back off (honouring Retry-After if present) and retry with exponential delay + jitter",
+        "d": "Switch the request to a GET"
+      },
+      "answer": "c",
+      "explanation": "429 = rate limited. Exponential backoff with jitter (and respecting Retry-After) is standard; the official SDKs do this for you with max_retries."
+    },
+    {
+      "id": "API2",
+      "domain": "api_mechanics",
+      "difficulty": 2,
+      "type": "mcq",
+      "prompt": "Why do production extraction pipelines set temperature=0 and request a JSON schema / tool call instead of parsing free text?",
+      "options": {
+        "a": "It makes the model smarter",
+        "b": "It reduces output variance and constrains the response to a machine-checkable shape",
+        "c": "It is cheaper per token",
+        "d": "It disables the model's safety filters"
+      },
+      "answer": "b",
+      "explanation": "Determinism and structure: lower sampling variance plus a schema means outputs can be validated, diffed and tested. It does not guarantee correctness - that is what validation and evals are for."
+    },
+    {
+      "id": "VAL1",
+      "domain": "validation_schemas",
+      "difficulty": 1,
+      "type": "code_output",
+      "prompt": "With Pydantic v2, what is printed?",
+      "code": "from pydantic import BaseModel\n\nclass LineItem(BaseModel):\n    amount: float\n\nprint(LineItem(amount='12.5').amount)",
+      "options": {
+        "a": "12.5",
+        "b": "'12.5'",
+        "c": "(nothing - ValidationError is raised)",
+        "d": "12"
+      },
+      "answer": "a",
+      "explanation": "Pydantic's default (lax) mode coerces the numeric string '12.5' into a float. Use strict=True or Decimal fields when you need exact money handling."
+    },
+    {
+      "id": "VAL2",
+      "domain": "validation_schemas",
+      "difficulty": 3,
+      "type": "mcq",
+      "prompt": "Instructor re-prompts the model with validation errors on retry. Why is it DANGEROUS to put 'line items must sum to total' inside the extraction schema's validator?",
+      "options": {
+        "a": "Validators cannot access other fields",
+        "b": "It slows down parsing",
+        "c": "The model may invent numbers that balance, hiding a real billing error instead of reporting it",
+        "d": "Pydantic does not support model validators"
+      },
+      "answer": "c",
+      "explanation": "Validation feedback pressures the model to make the output 'pass'. For audit use cases, extract faithfully and run arithmetic checks as a separate deterministic audit step (see auditgate/extraction/schemas.py)."
+    },
+    {
+      "id": "ORC1",
+      "domain": "orchestration",
+      "difficulty": 2,
+      "type": "mcq",
+      "prompt": "An agent loop calls tools until the model says it is done. Which safeguard matters MOST before running it on customer documents?",
+      "options": {
+        "a": "A colourful progress bar",
+        "b": "A maximum step/iteration budget and a human approval gate for irreversible actions",
+        "c": "Using the largest model available",
+        "d": "Logging only the final answer"
+      },
+      "answer": "b",
+      "explanation": "Unbounded loops burn money and can take harmful actions. Cap steps, log every step, and put a human in the loop for anything irreversible (payments, emails, deletions)."
+    },
+    {
+      "id": "ORC2",
+      "domain": "orchestration",
+      "difficulty": 3,
+      "type": "code_output",
+      "prompt": "This pipeline step processes three documents concurrently. What is printed?",
+      "code": "import asyncio\n\nasync def extract(doc):\n    await asyncio.sleep(1)\n    return doc\n\nasync def main():\n    print(await asyncio.gather(*(extract(d) for d in 'abc')))\n\nasyncio.run(main())",
+      "options": {
+        "a": "['a', 'b', 'c'] in about 3 seconds",
+        "b": "['c', 'b', 'a'] in about 1 second",
+        "c": "['a', 'b', 'c'] in about 1 second",
+        "d": "A RuntimeError"
+      },
+      "answer": "c",
+      "explanation": "asyncio.gather runs the coroutines concurrently (total ~1s) and returns results in the ORDER THE AWAITABLES WERE PASSED, not completion order."
+    },
+    {
+      "id": "SEC1",
+      "domain": "data_security",
+      "difficulty": 1,
+      "type": "mcq",
+      "prompt": "A client invoice contains a bank account number. You want an LLM to extract the vendor and total. What is the safest design?",
+      "options": {
+        "a": "Send the full document; the provider promises not to train on it",
+        "b": "Replace sensitive values with placeholders locally, send the sanitized text, re-insert originals after extraction",
+        "c": "Base64-encode the document before sending",
+        "d": "Ask the model in the prompt not to remember the account number"
+      },
+      "answer": "b",
+      "explanation": "Data that never leaves cannot leak. Reversible tokenization (sanitize -> extract -> rehydrate) keeps the model useful without exposing the secret. Base64 is encoding, not protection."
+    },
+    {
+      "id": "SEC2",
+      "domain": "data_security",
+      "difficulty": 3,
+      "type": "mcq",
+      "prompt": "Your regex flags any 16-digit sequence as a credit card, and it is redacting invoice numbers. What is the best fix?",
+      "options": {
+        "a": "Remove credit card detection",
+        "b": "Only redact numbers that start with 4",
+        "c": "Validate candidates with the Luhn checksum (and optionally IIN ranges) before redacting",
+        "d": "Ask the LLM whether it is a card number"
+      },
+      "answer": "c",
+      "explanation": "Pattern + checksum validation cuts false positives without losing recall. Sending the candidate to an LLM to check would leak the very thing you are protecting."
+    }
+  ]
+}

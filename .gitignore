@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets & local state
+.env
+.env.*
+!.env.example
+.trainer_progress.json
+eval_report*.json
+
+# Client documents never belong in git
+data/
+uploads/
+*.pdf
+!tests/fixtures/*.pdf
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+.streamlit/secrets.toml
