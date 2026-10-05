@@ -12,8 +12,9 @@ Scoring
                   mastery >= 0.50 -> accelerated
                   otherwise       -> full
   Optional modules (M0 Python Basics) are skipped instead of fast-tracked.
-* Days are re-allocated so the plan always fills exactly the 90-day sprint:
-  time saved on what you already know is spent on what you don't.
+* Days are re-allocated so the plan always fills the sprint exactly (90 days by
+  default, adjustable with --days): time saved on what you already know is spent
+  on what you don't.
 """
 
 from __future__ import annotations
@@ -36,12 +37,16 @@ DOMAIN_LABELS = {
     "validation_schemas": "Validation schemas",
     "orchestration": "Orchestration",
     "data_security": "Data security",
+    "tool_calling": "Tool calling",
+    "state_persistence": "State & persistence",
+    "observability": "Observability",
     "evaluations": "Evaluations",
 }
 
 Track = Literal["skip", "fast-track", "accelerated", "full"]
 TRACK_WEIGHT: dict[str, float] = {"skip": 0.0, "fast-track": 0.2, "accelerated": 0.6, "full": 1.0}
 MIN_MODULE_DAYS = 3
+MIN_SPRINT_DAYS, MAX_SPRINT_DAYS = 60, 180
 
 LEVELS = [  # (minimum overall score, level name, description)
     (0.85, "Architect", "Strong fundamentals. Skim early modules and invest in security, evals and shipping."),
@@ -71,6 +76,7 @@ class AssessmentResult(BaseModel):
     level: str
     level_description: str
     start_module: str
+    sprint_days: int = 90
     plan: list[ModulePlan]
 
 
@@ -129,7 +135,8 @@ def allocate_days(weights: list[float], total: int, minimum: int = MIN_MODULE_DA
     return days
 
 
-def build_plan(domain_scores: dict[str, float], curriculum: dict[str, Any]) -> list[ModulePlan]:
+def build_plan(domain_scores: dict[str, float], curriculum: dict[str, Any],
+               sprint_days: int | None = None) -> list[ModulePlan]:
     modules = curriculum["modules"]
     masteries: list[float | None] = []
     for m in modules:
@@ -139,7 +146,7 @@ def build_plan(domain_scores: dict[str, float], curriculum: dict[str, Any]) -> l
     active = [i for i, t in enumerate(tracks) if t != "skip"]
     base = [modules[i]["days"][1] - modules[i]["days"][0] + 1 for i in active]
     allocated = allocate_days([b * TRACK_WEIGHT[tracks[i]] for b, i in zip(base, active)],
-                              curriculum["sprint_days"])
+                              sprint_days or curriculum["sprint_days"])
     days = dict(zip(active, allocated))
 
     plan, day = [], 1
@@ -152,12 +159,15 @@ def build_plan(domain_scores: dict[str, float], curriculum: dict[str, Any]) -> l
 
 
 def assess(answers: dict[str, str], questions: list[dict[str, Any]] | None = None,
-           curriculum: dict[str, Any] | None = None) -> AssessmentResult:
+           curriculum: dict[str, Any] | None = None, sprint_days: int | None = None) -> AssessmentResult:
     questions = questions if questions is not None else load_bank()
     curriculum = curriculum if curriculum is not None else load_curriculum()
+    sprint_days = sprint_days or curriculum["sprint_days"]
+    if not MIN_SPRINT_DAYS <= sprint_days <= MAX_SPRINT_DAYS:
+        raise ValueError(f"sprint must be {MIN_SPRINT_DAYS}-{MAX_SPRINT_DAYS} days")
     domain_scores, overall = score_domains(questions, answers)
     level, description = level_for(overall)
-    plan = build_plan(domain_scores, curriculum)
+    plan = build_plan(domain_scores, curriculum, sprint_days)
     start = next((p.id for p in plan if p.track not in ("skip", "fast-track")), plan[-1].id)
     correct = [q["id"] for q in questions if answers.get(q["id"], "").strip().lower() == q["answer"]]
     return AssessmentResult(
@@ -165,7 +175,7 @@ def assess(answers: dict[str, str], questions: list[dict[str, Any]] | None = Non
         answers=answers, correct=correct,
         incorrect=[q["id"] for q in questions if q["id"] not in correct],
         overall=overall, domain_scores=domain_scores, level=level,
-        level_description=description, start_module=start, plan=plan,
+        level_description=description, start_module=start, sprint_days=sprint_days, plan=plan,
     )
 
 

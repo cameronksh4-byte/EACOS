@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "passing_threshold": 0.8,
   "questions": [
     {
@@ -155,6 +155,96 @@
       },
       "answer": "c",
       "explanation": "Pattern + checksum validation cuts false positives without losing recall. Sending the candidate to an LLM to check would leak the very thing you are protecting."
+    },
+    {
+      "id": "TC1",
+      "domain": "tool_calling",
+      "difficulty": 1,
+      "type": "mcq",
+      "prompt": "A model calls your `find_purchase_orders` tool, but its arguments fail validation against the tool's schema. What should your agent loop do?",
+      "options": {
+        "a": "Crash the program so a developer notices",
+        "b": "Guess what the model meant and run the tool anyway",
+        "c": "Return a precise error as the tool result (which field, what was wrong) so the model can correct the call",
+        "d": "Silently skip the call and continue"
+      },
+      "answer": "c",
+      "explanation": "This is feedback injection: the model sees the exact validation error as the tool result and retries with fixed arguments. Guessing hides bugs; crashing wastes the run."
+    },
+    {
+      "id": "TC2",
+      "domain": "tool_calling",
+      "difficulty": 3,
+      "type": "mcq",
+      "prompt": "A tool raised KeyError('vendor_id'). Which tool result gives the model the best chance of fixing its own mistake?",
+      "options": {
+        "a": "\"Error\"",
+        "b": "The full 200-line Python traceback",
+        "c": "\"KeyError: 'vendor_id' (vendors.py:42). Valid keys are vendor_name, invoice_number. Retry with vendor_name.\" marked as an error",
+        "d": "Nothing - end the run"
+      },
+      "answer": "c",
+      "explanation": "Precise, short and actionable: error type, where it happened, and what valid input looks like. A bare 'Error' gives nothing to act on; a huge traceback buries the signal and wastes tokens."
+    },
+    {
+      "id": "SP1",
+      "domain": "state_persistence",
+      "difficulty": 2,
+      "type": "mcq",
+      "prompt": "A dispute waits 3 days for a manager's approval. The server restarts on day 2. What makes it possible to resume exactly where it stopped?",
+      "options": {
+        "a": "Keeping the workflow state in a global variable",
+        "b": "Checkpointing the workflow state to durable storage (SQLite/PostgreSQL) after each step, keyed by a run/thread ID",
+        "c": "Re-running the whole workflow from the start",
+        "d": "Asking the manager to re-upload the invoice"
+      },
+      "answer": "b",
+      "explanation": "Durable checkpoints keyed by a run ID let a new process load the exact state and continue. Memory is lost on restart; re-running can repeat side effects like sending emails."
+    },
+    {
+      "id": "SP2",
+      "domain": "state_persistence",
+      "difficulty": 3,
+      "type": "mcq",
+      "prompt": "Your payment provider sends the same 'invoice approved' webhook twice (it retries on a slow response). How do you make sure the vendor isn't paid twice?",
+      "options": {
+        "a": "Increase the server timeout",
+        "b": "Record each event's idempotency key (e.g. under a unique database constraint) and ignore any key already processed",
+        "c": "Respond more slowly so it doesn't retry",
+        "d": "Have someone delete duplicates by hand"
+      },
+      "answer": "b",
+      "explanation": "Idempotency keys make an operation safe to repeat: the second delivery finds the key already recorded and does nothing. Networks retry, so plan for duplicates."
+    },
+    {
+      "id": "OBS1",
+      "domain": "observability",
+      "difficulty": 1,
+      "type": "mcq",
+      "prompt": "Which is most useful to record for every step of an agent run, for later auditing?",
+      "options": {
+        "a": "Only the final answer",
+        "b": "Prompt version, model, tool calls with (sanitized) inputs and outputs, latency, token usage, and any human overrides",
+        "c": "A screenshot of the screen",
+        "d": "Nothing - logging is a privacy risk"
+      },
+      "answer": "b",
+      "explanation": "To answer 'why did it do that?' you need every intermediate decision. Log sanitized data so the audit trail itself doesn't leak PII."
+    },
+    {
+      "id": "OBS2",
+      "domain": "observability",
+      "difficulty": 2,
+      "type": "mcq",
+      "prompt": "In OpenTelemetry, what is a 'span'?",
+      "options": {
+        "a": "A timed, named unit of work (e.g. one model call or one tool call) with attributes, nested inside a trace",
+        "b": "A log file on disk",
+        "c": "A counter that only goes up",
+        "d": "An encryption key for telemetry"
+      },
+      "answer": "a",
+      "explanation": "A trace is the whole run; spans are its timed steps, nested parent/child, each carrying attributes like model name, tokens and latency."
     }
   ]
 }

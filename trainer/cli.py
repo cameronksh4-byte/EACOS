@@ -63,7 +63,8 @@ def _parse_answers(raw: str, questions: list[dict[str, Any]]) -> dict[str, str]:
 
 def _ask(questions: list[dict[str, Any]]) -> dict[str, str]:
     console.print(Panel.fit(
-        "10 questions across 5 domains. Answer honestly - press [bold]s[/] to skip anything you\n"
+        f"{len(questions)} questions across {len({q['domain'] for q in questions})} domains. "
+        "Answer honestly - press [bold]s[/] to skip anything you\n"
         "don't know. Guessing inflates your score and skips lessons you actually need.",
         title="Diagnostic Prior Knowledge Assessment", border_style="cyan"))
     answers: dict[str, str] = {}
@@ -103,7 +104,7 @@ def _show_result(result: AssessmentResult, questions: list[dict[str, Any]]) -> N
 
 
 def _show_plan(result: AssessmentResult) -> None:
-    table = Table(title="Your calibrated 90-day sprint")
+    table = Table(title=f"Your calibrated {result.sprint_days}-day sprint")
     for col in ("Module", "Title", "Mastery", "Track", "Days", "Schedule"):
         table.add_column(col)
     for p in result.plan:
@@ -119,11 +120,12 @@ def _show_plan(result: AssessmentResult) -> None:
 def assess(
     answers: str = typer.Option(None, help="Non-interactive: 'PY1=a,PY2=b,...' or 'a,b,c,...' in bank order"),
     save: bool = typer.Option(True, help="Save the result to .trainer_progress.json"),
+    days: int = typer.Option(90, min=60, max=180, help="Sprint length in days (e.g. 120 for a steadier pace)"),
 ) -> None:
     """Take the diagnostic and calibrate your starting point."""
     questions = load_bank()
     given = _parse_answers(answers, questions) if answers else _ask(questions)
-    result = run_assessment(given, questions)
+    result = run_assessment(given, questions, sprint_days=days)
     _show_result(result, questions)
     if save:
         progress = load_progress()
@@ -147,11 +149,13 @@ def modules() -> None:
     """List the curriculum modules."""
     completed = set(load_progress().get("completed_modules", []))
     table = Table(title="Curriculum")
-    for col in ("", "Module", "Title", "Default days", "AuditGate milestone"):
+    for col in ("", "Module", "Title", "Default days", "Built", "AuditGate milestone"):
         table.add_column(col)
+    status_style = {"ready": "[green]ready[/]", "partial": "[yellow]partial[/]", "planned": "[dim]planned[/]"}
     for m in load_curriculum()["modules"]:
         table.add_row("✅" if m["id"] in completed else "·", m["id"], m["title"],
-                      f"{m['days'][0]}-{m['days'][1]}", m["milestone"])
+                      f"{m['days'][0]}-{m['days'][1]}", status_style.get(m.get("build_status", "ready"), ""),
+                      m["milestone"])
     console.print(table)
 
 
@@ -160,6 +164,9 @@ def module(module_id: str) -> None:
     """Show objectives, concepts and code-along steps for a module."""
     m = _module(module_id)
     console.print(Panel(f"{m['why']}", title=f"{m['id']} · {m['title']}", border_style="cyan"))
+    if m.get("build_status") != "ready":
+        console.print(f"[yellow]Build status: {m.get('build_status')}[/] - steps marked [coming in a later stage] "
+                      "aren't in the codebase yet. Everything else is ready to work on.\n")
     console.print("[bold]Objectives[/]")
     for o in m["objectives"]:
         console.print(f"  • {o}")
@@ -176,6 +183,10 @@ def module(module_id: str) -> None:
 def check(module_id: str) -> None:
     """Run a module's checkpoint tests and record completion if they pass."""
     m = _module(module_id)
+    if m.get("build_status") == "planned":
+        console.print(f"[yellow]{m['id']} isn't built yet[/] - its checkpoint tests arrive with its code. "
+                      "Work on the modules before it for now.")
+        raise typer.Exit(code=1)
     cmd = shlex.split(m["checkpoint"])
     if cmd[:2] == ["uv", "run"]:  # already inside the project env: call pytest directly
         cmd = [sys.executable, "-m", *cmd[2:]]

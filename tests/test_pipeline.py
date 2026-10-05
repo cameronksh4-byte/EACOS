@@ -2,7 +2,7 @@
 its own slice, e.g. ``uv run pytest -k m3``.
 
   m1 - schemas & validation        m4 - pipeline, orchestration, API
-  m2 - extraction backends          m5 - evaluations
+  m2 - extraction & agent backends  m6 - evaluations
   m3 - PII sanitization             trainer - assessment engine & content integrity
 
 Module 0's checkpoint lives in trainer/exercises/test_m0_basics.py and grades the
@@ -270,28 +270,28 @@ def test_m4_api_endpoints(monkeypatch):
     get_settings.cache_clear()
 
 
-# --------------------------------------------------------------------------- M5 evaluations
+# --------------------------------------------------------------------------- M6 evaluations
 
 
-def test_m5_heuristic_baseline_passes_all_gates(sanitizer):
+def test_m6_heuristic_baseline_passes_all_gates(sanitizer):
     report = run_evals(HeuristicExtractor(), sanitizer=sanitizer, settings=OFFLINE)
     assert report.passed, report.failed_gates
     assert report.pii_values_leaked == 0 and report.pii_values_total > 0
 
 
-def test_m5_eval_catches_leaks_when_sanitizer_is_disabled():
+def test_m6_eval_catches_leaks_when_sanitizer_is_disabled():
     report = run_evals(HeuristicExtractor(), sanitizer=Sanitizer(spacy_model=None, detectors=[]), settings=OFFLINE)
     assert not report.passed
     assert "pii_leakage" in report.failed_gates
 
 
-def test_m5_values_match():
+def test_m6_values_match():
     assert values_match("1536.00", "1536.0")
     assert values_match("Maria Gonzalez", "maria gonzalez ")
     assert not values_match("420.00", None)
 
 
-def test_m5_golden_dataset_is_well_formed():
+def test_m6_golden_dataset_is_well_formed():
     cases = load_cases()
     assert len({c["id"] for c in cases}) == len(cases) >= 10
     for c in cases:
@@ -304,8 +304,8 @@ def test_m5_golden_dataset_is_well_formed():
 
 def test_trainer_bank_covers_five_domains_with_valid_answers():
     bank = load_bank()
-    assert len(bank) == 10
-    assert len({q["domain"] for q in bank}) == 5
+    assert len(bank) == 16
+    assert len({q["domain"] for q in bank}) == 8
     for q in bank:
         assert q["answer"] in q["options"] and 1 <= q["difficulty"] <= 3
 
@@ -321,8 +321,9 @@ def test_trainer_code_questions_answer_matches_real_output(qid):
 
 def test_trainer_curriculum_modules_map_to_tests():
     modules = load_curriculum()["modules"]
-    assert [m["id"] for m in modules] == ["M0", "M1", "M2", "M3", "M4", "M5"]
+    assert [m["id"] for m in modules] == ["M0", "M1", "M2", "M3", "M4", "M5", "M6"]
     assert "trainer/exercises/test_m0_basics.py" in modules[0]["checkpoint"]
+    assert {m["build_status"] for m in modules} <= {"ready", "partial", "planned"}
     for m in modules[1:]:
         assert f"-k {m['id'].lower()}" in m["checkpoint"]
     assert sum(m["days"][1] - m["days"][0] + 1 for m in modules) == 90
@@ -357,7 +358,7 @@ def test_trainer_allocate_days_always_fills_sprint():
 
 @pytest.mark.parametrize("answers, level, start", [
     ({}, "Foundation", "M0"),
-    ({q["id"]: q["answer"] for q in json.load(open("trainer/assessment_bank.json"))["questions"]}, "Architect", "M5"),
+    ({q["id"]: q["answer"] for q in json.load(open("trainer/assessment_bank.json"))["questions"]}, "Architect", "M6"),
 ])
 def test_trainer_assessment_calibrates_level(answers, level, start):
     result = assess(answers)
@@ -387,9 +388,18 @@ def test_trainer_python_experts_skip_module_0():
     bank = load_bank()
     plan = {p.id: p for p in assess({q["id"]: q["answer"] for q in bank}).plan}
     assert plan["M0"].track == "skip" and plan["M0"].days == 0 and plan["M0"].start_day is None
-    assert plan["M1"].start_day == 1 and plan["M5"].end_day == 90
+    assert plan["M1"].start_day == 1 and plan["M6"].end_day == 90
 
 
 def test_trainer_python_beginners_get_full_module_0():
     plan = {p.id: p for p in assess({}).plan}
     assert plan["M0"].track == "full" and plan["M0"].start_day == 1 and plan["M0"].days >= 5
+
+
+def test_trainer_longer_sprint_scales_every_module():
+    short = {p.id: p for p in assess({}).plan}
+    long = {p.id: p for p in assess({}, sprint_days=120).plan}
+    assert long["M6"].end_day == 120
+    assert all(long[i].days >= short[i].days for i in short)
+    with pytest.raises(ValueError):
+        assess({}, sprint_days=30)
