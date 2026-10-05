@@ -31,3 +31,8 @@ eval_report*.json
 .idea/
 .DS_Store
 .streamlit/secrets.toml
+
+# Local agent state (checkpoints include the PII vault)
+*.db
+*.db-wal
+*.db-shm

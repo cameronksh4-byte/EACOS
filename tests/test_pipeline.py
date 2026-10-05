@@ -329,7 +329,7 @@ def test_trainer_curriculum_modules_map_to_tests():
     assert sum(m["days"][1] - m["days"][0] + 1 for m in modules) == 90
 
 
-EXERCISES = {"m0": "m0_basics", "m2": "m2_react", "m3": "m3_security"}
+EXERCISES = {"m0": "m0_basics", "m2": "m2_react", "m3": "m3_security", "m4": "m4_graphs"}
 
 
 def _run_exercise_checkpoint(module: str, target: str) -> subprocess.CompletedProcess:

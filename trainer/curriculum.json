@@ -267,7 +267,7 @@
         49,
         63
       ],
-      "build_status": "partial",
+      "build_status": "ready",
       "why": "Real work pauses. An invoice dispute can wait days for a manager. Systems that can stop, survive a restart, and resume exactly where they left off are what businesses trust.",
       "objectives": [
         "Model workflows as DAGs and as cyclic state graphs (repair loops)",
@@ -287,29 +287,39 @@
       ],
       "code_along": [
         {
-          "title": "Read the pipeline",
-          "file": "auditgate/pipeline.py",
-          "task": "It's a straight-line DAG today. Draw it as nodes and edges on paper."
-        },
-        {
-          "title": "Serve it",
-          "file": "auditgate/api.py",
-          "task": "uv run uvicorn auditgate.api:app --port 8000, then POST a golden-dataset document to /audit/text."
-        },
-        {
           "title": "Warm up on graphs",
           "file": "tutorials/langgraph/",
-          "task": "Work through lessons 01-03 in the existing LangGraph tutorial."
+          "task": "Work through lessons 01-03 of the existing LangGraph tutorial (state, conditional edges, checkpointers, interrupts)."
         },
         {
-          "title": "[coming in a later stage] Resolver as a graph",
+          "title": "Build the runtime yourself",
+          "file": "trainer/exercises/m4_graphs.py",
+          "task": "Implement route_after_tools, the SQLite Checkpointer, run() with pause/resume, and process_once. Run `check M4` after each."
+        },
+        {
+          "title": "Read the DAG you already have",
+          "file": "auditgate/pipeline.py",
+          "task": "process_text is a straight-line DAG: load -> sanitize -> extract -> validate -> audit. Draw it, then draw graph.py's resolver and mark every cycle."
+        },
+        {
+          "title": "Read the production graph",
           "file": "auditgate/agent/graph.py",
-          "task": "Repair node, human-interrupt node, SQLite checkpointer, resume-by-thread-id, idempotent approval webhook."
+          "task": "Find: the repair node and its exit condition, the human_review interrupt (and why nothing before interrupt() may have side effects), and why the email is queued in finalize."
+        },
+        {
+          "title": "Pause, restart, resume",
+          "file": "(terminal + browser)",
+          "task": "Start the API (uv run uvicorn auditgate.api:app), POST /resolutions with a failing invoice, stop the server, start it again, GET the resolution - it's still waiting. Then POST /webhooks/approval twice with the same event_id."
+        },
+        {
+          "title": "Batch with bounded concurrency",
+          "file": "auditgate/pipeline.py",
+          "task": "Use asyncio.run(process_batch(paths, concurrency=4)) on a folder of documents. Change concurrency and time it."
         }
       ],
-      "checkpoint": "uv run pytest tests/test_pipeline.py -k m4 -q --tb=line",
+      "checkpoint": "uv run pytest trainer/exercises/test_m4_graphs.py tests -k m4 -q --tb=line",
       "milestone": "Disputes can wait for human approval, survive restarts, and never execute twice.",
-      "stretch": "Swap SQLite for PostgreSQL and run two workers against the same checkpoint store."
+      "stretch": "Swap SQLite for PostgreSQL (langgraph-checkpoint-postgres) and run two API workers against the same database."
     },
     {
       "id": "M5",

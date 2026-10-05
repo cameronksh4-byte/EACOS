@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 from enum import StrEnum
 from pathlib import Path
@@ -123,3 +124,21 @@ def process_text(
 
 def process_file(path: str | Path, doc_type: DocumentType | None = None, **kwargs: Any) -> AuditReport:
     return process_text(load_text(path), doc_type, **kwargs)
+
+
+async def process_batch(paths: list[str | Path], *, concurrency: int = 4, **kwargs: Any) -> list[AuditReport]:
+    """Audit many files concurrently, at most ``concurrency`` at a time, preserving input order.
+
+    Each file runs in a worker thread (extraction may block on I/O or a model call); the
+    semaphore bounds how many run at once so a folder of 500 invoices doesn't open 500
+    model connections. Results come back in the order the paths were given.
+    """
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
+    gate = asyncio.Semaphore(concurrency)
+
+    async def one(path: str | Path) -> AuditReport:
+        async with gate:
+            return await asyncio.to_thread(process_file, path, **kwargs)
+
+    return await asyncio.gather(*(one(p) for p in paths))
