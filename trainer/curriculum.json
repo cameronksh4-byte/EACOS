@@ -138,7 +138,7 @@
         20,
         34
       ],
-      "build_status": "planned",
+      "build_status": "ready",
       "why": "Frameworks hide the loop that every agent runs. Build it once by hand - prompt, tool call, execute, feed back, repeat, stop - and every framework afterwards is just packaging.",
       "objectives": [
         "Call model APIs directly with the raw Anthropic and OpenAI SDKs (no frameworks)",
@@ -183,7 +183,7 @@
           "task": "LLMExtractor uses instructor. Identify which parts of your loop instructor is doing for you."
         }
       ],
-      "checkpoint": "uv run pytest trainer/exercises/test_m2_react.py tests/test_pipeline.py -k m2 -q --tb=line",
+      "checkpoint": "uv run pytest trainer/exercises/test_m2_react.py tests -k m2 -q --tb=line",
       "milestone": "AuditGate has an exception-resolution agent that investigates failed invoices with tools and drafts a dispute.",
       "stretch": "Add a `consensus` mode: run two providers and flag any field where their resolutions disagree."
     },

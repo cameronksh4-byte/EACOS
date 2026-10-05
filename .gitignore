@@ -21,8 +21,8 @@ htmlcov/
 eval_report*.json
 
 # Client documents never belong in git
-data/
-uploads/
+/data/
+/uploads/
 *.pdf
 !tests/fixtures/*.pdf
 

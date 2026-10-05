@@ -204,9 +204,15 @@ class Sanitizer:
 
     def sanitize(self, text: str, vault: Vault | None = None) -> SanitizedText:
         vault = vault or Vault()
+        spans = self._spans(text)
+        # Once a value has been masked, mask it everywhere it reappears - even where no
+        # detector would fire (e.g. a name repeated in free text inside a tool result).
+        for value in sorted(vault.value_to_token, key=len, reverse=True):
+            label = TOKEN_RE.match(vault.value_to_token[value]).group(1)  # type: ignore[union-attr]
+            spans += [(m.start(), m.end(), label) for m in re.finditer(re.escape(value), text)]
         out: list[str] = []
         cursor = 0
-        for start, end, label in self._resolve_overlaps(self._spans(text)):
+        for start, end, label in self._resolve_overlaps(spans):
             out.append(text[cursor:start])
             out.append(vault.token_for(label, text[start:end]))
             cursor = end
