@@ -11,6 +11,7 @@ Scoring
 * Module track:   mastery >= 0.80 -> fast-track  (review + checkpoint)
                   mastery >= 0.50 -> accelerated
                   otherwise       -> full
+  Optional modules (M0 Python Basics) are skipped instead of fast-tracked.
 * Days are re-allocated so the plan always fills exactly the 90-day sprint:
   time saved on what you already know is spent on what you don't.
 """
@@ -38,15 +39,15 @@ DOMAIN_LABELS = {
     "evaluations": "Evaluations",
 }
 
-Track = Literal["fast-track", "accelerated", "full"]
-TRACK_WEIGHT: dict[str, float] = {"fast-track": 0.2, "accelerated": 0.6, "full": 1.0}
+Track = Literal["skip", "fast-track", "accelerated", "full"]
+TRACK_WEIGHT: dict[str, float] = {"skip": 0.0, "fast-track": 0.2, "accelerated": 0.6, "full": 1.0}
 MIN_MODULE_DAYS = 3
 
 LEVELS = [  # (minimum overall score, level name, description)
     (0.85, "Architect", "Strong fundamentals. Skim early modules and invest in security, evals and shipping."),
     (0.60, "Practitioner", "Solid base with specific gaps. Fast-track what you know; go deep on the weak domains."),
     (0.35, "Builder", "Some foundations in place. Follow the plan closely and do every code-along."),
-    (0.00, "Foundation", "Start from Module 1 and take it steadily - every later module builds on it."),
+    (0.00, "Foundation", "Start at the very beginning and take it steadily - every later module builds on the first."),
 ]
 
 
@@ -56,8 +57,8 @@ class ModulePlan(BaseModel):
     mastery: float | None = Field(description="None when the module's domain is not assessed")
     track: Track
     days: int
-    start_day: int
-    end_day: int
+    start_day: int | None = Field(description="None when the module is skipped")
+    end_day: int | None = None
 
 
 class AssessmentResult(BaseModel):
@@ -101,11 +102,11 @@ def level_for(overall: float) -> tuple[str, str]:
     return LEVELS[-1][1], LEVELS[-1][2]  # pragma: no cover
 
 
-def track_for(mastery: float | None) -> Track:
+def track_for(mastery: float | None, optional: bool = False) -> Track:
     if mastery is None:  # not assessed (e.g. evaluations capstone): everyone does it fully
         return "full"
     if mastery >= 0.8:
-        return "fast-track"
+        return "skip" if optional else "fast-track"
     if mastery >= 0.5:
         return "accelerated"
     return "full"
@@ -134,14 +135,18 @@ def build_plan(domain_scores: dict[str, float], curriculum: dict[str, Any]) -> l
     for m in modules:
         scores = [domain_scores[d] for d in m["domains"] if d in domain_scores]
         masteries.append(round(sum(scores) / len(scores), 4) if scores else None)
-    tracks = [track_for(ms) for ms in masteries]
-    base = [m["days"][1] - m["days"][0] + 1 for m in modules]
-    days = allocate_days([b * TRACK_WEIGHT[t] for b, t in zip(base, tracks)], curriculum["sprint_days"])
+    tracks = [track_for(ms, m.get("optional", False)) for m, ms in zip(modules, masteries)]
+    active = [i for i, t in enumerate(tracks) if t != "skip"]
+    base = [modules[i]["days"][1] - modules[i]["days"][0] + 1 for i in active]
+    allocated = allocate_days([b * TRACK_WEIGHT[tracks[i]] for b, i in zip(base, active)],
+                              curriculum["sprint_days"])
+    days = dict(zip(active, allocated))
 
     plan, day = [], 1
-    for m, ms, t, d in zip(modules, masteries, tracks, days):
-        plan.append(ModulePlan(id=m["id"], title=m["title"], mastery=ms, track=t,
-                               days=d, start_day=day, end_day=day + d - 1))
+    for i, (m, ms, t) in enumerate(zip(modules, masteries, tracks)):
+        d = days.get(i, 0)
+        plan.append(ModulePlan(id=m["id"], title=m["title"], mastery=ms, track=t, days=d,
+                               start_day=day if d else None, end_day=day + d - 1 if d else None))
         day += d
     return plan
 
@@ -153,7 +158,7 @@ def assess(answers: dict[str, str], questions: list[dict[str, Any]] | None = Non
     domain_scores, overall = score_domains(questions, answers)
     level, description = level_for(overall)
     plan = build_plan(domain_scores, curriculum)
-    start = next((p.id for p in plan if p.track != "fast-track"), plan[-1].id)
+    start = next((p.id for p in plan if p.track not in ("skip", "fast-track")), plan[-1].id)
     correct = [q["id"] for q in questions if answers.get(q["id"], "").strip().lower() == q["answer"]]
     return AssessmentResult(
         taken_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),

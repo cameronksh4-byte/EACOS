@@ -4,6 +4,9 @@ its own slice, e.g. ``uv run pytest -k m3``.
   m1 - schemas & validation        m4 - pipeline, orchestration, API
   m2 - extraction backends          m5 - evaluations
   m3 - PII sanitization             trainer - assessment engine & content integrity
+
+Module 0's checkpoint lives in trainer/exercises/test_m0_basics.py and grades the
+learner's own exercise file; here we only check it against the reference solutions.
 """
 
 from __future__ import annotations
@@ -11,6 +14,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import subprocess
+import sys
 from decimal import Decimal
 from typing import Any
 
@@ -315,9 +321,32 @@ def test_trainer_code_questions_answer_matches_real_output(qid):
 
 def test_trainer_curriculum_modules_map_to_tests():
     modules = load_curriculum()["modules"]
-    assert [m["id"] for m in modules] == ["M1", "M2", "M3", "M4", "M5"]
-    for m in modules:
+    assert [m["id"] for m in modules] == ["M0", "M1", "M2", "M3", "M4", "M5"]
+    assert "trainer/exercises/test_m0_basics.py" in modules[0]["checkpoint"]
+    for m in modules[1:]:
         assert f"-k {m['id'].lower()}" in m["checkpoint"]
+    assert sum(m["days"][1] - m["days"][0] + 1 for m in modules) == 90
+
+
+def _run_m0_checkpoint(target: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "trainer/exercises/test_m0_basics.py", "-q", "-p", "no:cacheprovider"],
+        env=os.environ | {"M0_TARGET": target}, capture_output=True, text=True,
+    )
+
+
+def test_trainer_m0_reference_solutions_pass_checkpoint():
+    result = _run_m0_checkpoint("trainer.exercises.solutions.m0_basics")
+    assert result.returncode == 0, result.stdout
+
+
+def test_trainer_m0_exercise_stubs_are_unsolved():
+    import trainer.exercises.m0_basics as stubs
+
+    with pytest.raises(NotImplementedError):
+        stubs.format_money(1)
+    stubs.collect_tokens("A")
+    assert stubs.collect_tokens("B") == ["A", "B"]  # exercise 10 ships with the bug on purpose
 
 
 def test_trainer_allocate_days_always_fills_sprint():
@@ -327,7 +356,7 @@ def test_trainer_allocate_days_always_fills_sprint():
 
 
 @pytest.mark.parametrize("answers, level, start", [
-    ({}, "Foundation", "M1"),
+    ({}, "Foundation", "M0"),
     ({q["id"]: q["answer"] for q in json.load(open("trainer/assessment_bank.json"))["questions"]}, "Architect", "M5"),
 ])
 def test_trainer_assessment_calibrates_level(answers, level, start):
@@ -352,3 +381,15 @@ def test_m3_optional_spacy_ner_is_line_scoped():
     assert "Maria Gonzalez" not in out.text
     assert out.text.startswith("Bill To:")  # labels are never mistaken for names
     assert "\n" not in "".join(out.vault.token_to_value.values())
+
+
+def test_trainer_python_experts_skip_module_0():
+    bank = load_bank()
+    plan = {p.id: p for p in assess({q["id"]: q["answer"] for q in bank}).plan}
+    assert plan["M0"].track == "skip" and plan["M0"].days == 0 and plan["M0"].start_day is None
+    assert plan["M1"].start_day == 1 and plan["M5"].end_day == 90
+
+
+def test_trainer_python_beginners_get_full_module_0():
+    plan = {p.id: p for p in assess({}).plan}
+    assert plan["M0"].track == "full" and plan["M0"].start_day == 1 and plan["M0"].days >= 5

@@ -3,7 +3,7 @@
     uv run python -m trainer.cli assess         # diagnostic, calibrates your plan
     uv run python -m trainer.cli plan           # your personalised 90-day schedule
     uv run python -m trainer.cli modules        # curriculum overview
-    uv run python -m trainer.cli module M3      # objectives + code-along steps
+    uv run python -m trainer.cli module M0      # objectives + code-along steps
     uv run python -m trainer.cli check M3       # run the module checkpoint tests
     uv run python -m trainer.cli eval           # run the AuditGate eval gate
     uv run python -m trainer.cli status         # where you are and what's next
@@ -36,7 +36,7 @@ from trainer.assessment import (
 app = typer.Typer(add_completion=False, help="AuditGate Trainer: assess, learn, build, evaluate.")
 console = Console()
 
-TRACK_STYLE = {"fast-track": "green", "accelerated": "yellow", "full": "red"}
+TRACK_STYLE = {"skip": "dim", "fast-track": "green", "accelerated": "yellow", "full": "red"}
 
 
 def _bar(score: float, width: int = 20) -> str:
@@ -110,8 +110,8 @@ def _show_plan(result: AssessmentResult) -> None:
         mastery = "n/a (capstone)" if p.mastery is None else f"{p.mastery:.0%}"
         style = TRACK_STYLE[p.track]
         marker = " ◀ start" if p.id == result.start_module else ""
-        table.add_row(p.id + marker, p.title, mastery, f"[{style}]{p.track}[/]", str(p.days),
-                      f"Day {p.start_day}-{p.end_day}")
+        schedule = f"Day {p.start_day}-{p.end_day}" if p.days else "[dim]skipped - you know this[/]"
+        table.add_row(p.id + marker, p.title, mastery, f"[{style}]{p.track}[/]", str(p.days), schedule)
     console.print(table)
 
 
@@ -144,7 +144,7 @@ def plan() -> None:
 
 @app.command()
 def modules() -> None:
-    """List the five curriculum modules."""
+    """List the curriculum modules."""
     completed = set(load_progress().get("completed_modules", []))
     table = Table(title="Curriculum")
     for col in ("", "Module", "Title", "Default days", "AuditGate milestone"):
@@ -188,7 +188,8 @@ def check(module_id: str) -> None:
         save_progress(progress)
         console.print(f"[bold green]{m['id']} checkpoint passed.[/] Milestone: {m['milestone']}")
     else:
-        console.print(f"[bold red]{m['id']} checkpoint failed.[/] Read the failures above - they are your next lesson.")
+        console.print(f"[bold yellow]{m['id']}: not there yet.[/] Each failure above is one thing left to do - "
+                      "fix them one at a time and re-run this command.")
     raise typer.Exit(code=code)
 
 
@@ -209,7 +210,7 @@ def status() -> None:
     done = set(progress.get("completed_modules", []))
     console.print(f"Level: [bold]{result.level}[/] ({result.overall:.0%}) · assessed {result.taken_at}")
     console.print(f"Completed: {', '.join(sorted(done)) or 'none yet'}")
-    upcoming = [p for p in result.plan if p.id not in done]
+    upcoming = [p for p in result.plan if p.id not in done and p.track != "skip"]
     if upcoming:
         nxt = upcoming[0]
         console.print(f"Next: [bold cyan]{nxt.id} · {nxt.title}[/] ({nxt.track}, {nxt.days} days) -> "

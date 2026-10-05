@@ -18,7 +18,7 @@ cp .env.example .env                      # default provider "heuristic" is 100%
 
 uv run python -m trainer.cli assess       # 1. diagnostic, about 10 minutes
 uv run python -m trainer.cli plan         # 2. your calibrated 90-day plan
-uv run python -m trainer.cli module M1    # 3. start learning
+uv run python -m trainer.cli module M0    # 3. start learning (M0 is skipped if you already know Python)
 
 uv run pytest                             # full test suite
 uv run python -m auditgate.evals.runner   # eval gate: accuracy, schema adherence, PII leakage
@@ -41,17 +41,20 @@ uv run python -m auditgate.evals.runner --spacy
 |---|---|
 | `assess` | 10 questions in 5 domains (Python data structures, API mechanics, validation schemas, orchestration, data security), weighted by difficulty. Press `s` to skip a question instead of guessing. `--answers "a,b,..."` runs it non-interactively. |
 | `plan` | Your 90-day schedule. Each module is set to **fast-track**, **accelerated** or **full** based on your score in its domain. Days you save on what you already know go to your weak spots. |
-| `modules` / `module M3` | Overview, objectives, key concepts, code-along steps tied to real files, checkpoint, milestone and stretch goal. |
-| `check M3` | Runs that module's checkpoint tests (`pytest -k m3`) and records completion. |
+| `modules` / `module M0` | Overview, objectives, key concepts, code-along steps tied to real files, checkpoint, milestone and stretch goal. |
+| `check M0` | Runs that module's checkpoint tests and records completion. |
 | `eval` | Runs the AuditGate eval gate. |
 | `status` | Where you are and what to do next. |
 
 **Levels:** Foundation (<35%) → Builder (35–60%) → Practitioner (60–85%) → Architect (≥85%).
 
-### The five modules
+**Module 0** is for anyone who isn't yet comfortable reading Python. It only appears in your plan if you scored below 80% on Python data structures; otherwise it's skipped and its days go to other modules. Write your answers in `trainer/exercises/m0_basics.py` and check them with `check M0`. Each passing test is one finished exercise. Reference solutions are in `trainer/exercises/solutions/`; try the exercises yourself before you look.
+
+### The modules
 
 | # | Module | You build |
 |---|---|---|
+| M0 | Python Basics for AI Engineers *(optional)* | `trainer/exercises/m0_basics.py`: 10 invoice-themed exercises, from f-strings to fixing a data-leak bug |
 | M1 | Typed Data & Validation Schemas | `extraction/schemas.py`: documents as Pydantic models, plus deterministic audit rules |
 | M2 | LLM API Mechanics & Structured Outputs | `extraction/extractor.py`: instructor with Ollama, OpenAI or Anthropic behind one interface |
 | M3 | Data Security & PII Sanitization | `security/sanitizer.py`: reversible tokenization, with leakage measured |
@@ -114,5 +117,6 @@ auditgate/    config.py · pipeline.py · api.py · ui.py
               security/sanitizer.py
               extraction/schemas.py · extraction/extractor.py
               evals/runner.py · evals/golden_dataset.json
+trainer/exercises/           m0_basics.py (yours to edit) · test_m0_basics.py · solutions/
 tests/test_pipeline.py       test names prefixed m1–m5 / trainer → per-module checkpoints
 ```

@@ -3,6 +3,71 @@
   "sprint_days": 90,
   "modules": [
     {
+      "id": "M0",
+      "title": "Python Basics for AI Engineers",
+      "domains": [
+        "python_data_structures"
+      ],
+      "days": [
+        1,
+        7
+      ],
+      "optional": true,
+      "why": "Every later module is written in Python. A week spent making the basics automatic pays for itself many times over - and every exercise here uses invoice data, so you're already thinking like AuditGate.",
+      "objectives": [
+        "Run Python interactively and run a file from the terminal",
+        "Work with strings, numbers, lists and dictionaries",
+        "Write functions with if-statements and for-loops",
+        "Handle 'nothing' safely with None",
+        "Spot and fix the shared-default-list bug"
+      ],
+      "concepts": [
+        "variables & types",
+        "f-strings",
+        "string methods (strip, replace, split, join)",
+        "lists & dictionaries",
+        "for-loops & if-statements",
+        "functions & return values",
+        "None",
+        "mutable default arguments"
+      ],
+      "code_along": [
+        {
+          "title": "Meet the interactive shell",
+          "file": "(terminal)",
+          "task": "Run `uv run python`, then try: 2 + 2, name = 'Acme', name.upper(), [1, 2, 3][0], {'total': 40}['total']. Type exit() to leave."
+        },
+        {
+          "title": "Read the official tutorial",
+          "file": "https://docs.python.org/3/tutorial/",
+          "task": "Read sections 3 (An Informal Introduction), 4.1-4.8 (Control Flow) and 5.1-5.5 (Data Structures). Type every example yourself rather than copy-pasting."
+        },
+        {
+          "title": "Exercises 1-4: strings, numbers, loops",
+          "file": "trainer/exercises/m0_basics.py",
+          "task": "Replace each `raise NotImplementedError(...)` with your code. Run the checkpoint after each one and watch tests turn green."
+        },
+        {
+          "title": "Exercises 5-9: dictionaries, conditions, None",
+          "file": "trainer/exercises/m0_basics.py",
+          "task": "These are the patterns AuditGate's code uses everywhere: counting, grouping, filtering, and handling empty input."
+        },
+        {
+          "title": "Exercise 10: fix the privacy bug",
+          "file": "trainer/exercises/m0_basics.py",
+          "task": "collect_tokens() leaks data between calls (assessment question PY2). Fix it, then explain to yourself in one sentence why it happened."
+        },
+        {
+          "title": "Compare with the reference",
+          "file": "trainer/exercises/solutions/m0_basics.py",
+          "task": "Only after your tests pass: compare your answers with the solutions and read the 'Shorter' comments - that's the next step in fluency."
+        }
+      ],
+      "checkpoint": "uv run pytest trainer/exercises/test_m0_basics.py -q --tb=line",
+      "milestone": "You can read and write the Python that AuditGate is built from.",
+      "stretch": "Rewrite exercises 4, 7 and 9 as one-liners using sum(), a list comprehension and max(key=...)."
+    },
+    {
       "id": "M1",
       "title": "Typed Data & Validation Schemas",
       "domains": [
@@ -10,8 +75,8 @@
         "validation_schemas"
       ],
       "days": [
-        1,
-        14
+        8,
+        21
       ],
       "why": "Every reliable AI system starts with a precise definition of 'correct output'. If you can't describe an invoice in types, no model can fill it in reliably.",
       "objectives": [
@@ -61,8 +126,8 @@
         "api_mechanics"
       ],
       "days": [
-        15,
-        32
+        22,
+        36
       ],
       "why": "Clients pay for answers they can trust. Structured outputs turn a chatty model into a function that returns a validated object - or fails loudly.",
       "objectives": [
@@ -112,8 +177,8 @@
         "data_security"
       ],
       "days": [
-        33,
-        50
+        37,
+        53
       ],
       "why": "This is the product's moat. Business owners don't fear AI - they fear their customers' bank details ending up in someone else's logs.",
       "objectives": [
@@ -163,8 +228,8 @@
         "orchestration"
       ],
       "days": [
-        51,
-        70
+        54,
+        71
       ],
       "why": "Real work is multi-step: load, clean, extract, verify, route to a human. Orchestration is where reliability is won or lost.",
       "objectives": [
@@ -214,7 +279,7 @@
         "evaluations"
       ],
       "days": [
-        71,
+        72,
         90
       ],
       "why": "'It worked on my demo' doesn't sell. A scored, repeatable eval is both your engineering safety net and your best sales asset.",
