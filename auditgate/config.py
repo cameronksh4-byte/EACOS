@@ -28,6 +28,7 @@ class Settings(BaseModel):
     deny_terms: list[str] = Field(default_factory=list)
 
     max_retries: int = Field(default=2, ge=0, le=5)
+    egress_allowed_domains: list[str] = Field(default_factory=list)
 
     @property
     def sends_data_offsite(self) -> bool:
@@ -55,6 +56,8 @@ class Settings(BaseModel):
             redact_orgs=env("AUDITGATE_REDACT_ORGS", "false").lower() in ("1", "true", "yes"),
             deny_terms=[t.strip() for t in env("AUDITGATE_DENY_TERMS", "").split(",") if t.strip()],
             max_retries=int(env("AUDITGATE_MAX_RETRIES", "2")),
+            egress_allowed_domains=[d.strip() for d in env("AUDITGATE_EGRESS_ALLOWED_DOMAINS", "").split(",")
+                                    if d.strip()],
         )
 
 

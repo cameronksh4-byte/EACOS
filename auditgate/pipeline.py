@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, ValidationError
 from auditgate.config import Settings, get_settings
 from auditgate.extraction.extractor import Extractor, build_extractor, detect_document_type
 from auditgate.extraction.schemas import SCHEMAS, AuditFinding, DocumentType, Severity
+from auditgate.security.compliance import ComplianceContext, RuleSet
+from auditgate.security.injection import detect_injection, strip_invisible
 from auditgate.security.sanitizer import Sanitizer
 
 
@@ -30,6 +32,7 @@ class AuditReport(BaseModel):
     redactions: dict[str, int] = Field(default_factory=dict)
     outbound_payload: str = Field(description="Exactly the text an extraction backend received")
     sent_offsite: bool = False
+    rule_set: str | None = Field(default=None, description="Fingerprint of the compliance rules applied")
 
 
 def load_text(source: str | Path | bytes, filename: str | None = None) -> str:
@@ -72,10 +75,18 @@ def process_text(
     settings: Settings | None = None,
     extractor: Extractor | None = None,
     sanitizer: Sanitizer | None = None,
+    rules: RuleSet | None = None,
+    context: ComplianceContext | None = None,
 ) -> AuditReport:
     settings = settings or get_settings()
     extractor = extractor or build_extractor(settings)
     sanitizer = sanitizer or Sanitizer.from_settings(settings)
+
+    # Untrusted input: flag injected instructions, and drop invisible characters so
+    # hidden text can't reach the model unseen.
+    injection = [AuditFinding(code="POSSIBLE_PROMPT_INJECTION", severity=Severity.WARNING,
+                              message=f"{s.kind}: \"{s.excerpt[:120]}\"") for s in detect_injection(text)]
+    text, _ = strip_invisible(text)
     doc_type = doc_type or detect_document_type(text)
 
     sanitized = sanitizer.sanitize(text)
@@ -83,6 +94,7 @@ def process_text(
         doc_type=doc_type, extractor=extractor.name, status=Status.FAIL,
         redactions=sanitized.vault.counts, outbound_payload=sanitized.text,
         sent_offsite=extractor.name in ("openai", "anthropic"),
+        findings=list(injection), rule_set=rules.fingerprint if rules else None,
     )
     try:
         raw = extractor.extract(sanitized.text, doc_type)
@@ -102,7 +114,9 @@ def process_text(
         return report
 
     report.data = model.model_dump(mode="json")
-    report.findings = model.audit()
+    report.findings = model.audit() + injection
+    if rules:
+        report.findings += rules.evaluate(doc_type, model, context or ComplianceContext())
     report.status = _status(report.findings)
     return report
 

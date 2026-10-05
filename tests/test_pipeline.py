@@ -329,24 +329,31 @@ def test_trainer_curriculum_modules_map_to_tests():
     assert sum(m["days"][1] - m["days"][0] + 1 for m in modules) == 90
 
 
+EXERCISES = {"m0": "m0_basics", "m2": "m2_react", "m3": "m3_security"}
+
+
 def _run_exercise_checkpoint(module: str, target: str) -> subprocess.CompletedProcess:
-    name = {"m0": "m0_basics", "m2": "m2_react"}[module]
+    name = EXERCISES[module]
     return subprocess.run(
         [sys.executable, "-m", "pytest", f"trainer/exercises/test_{name}.py", "-q", "-p", "no:cacheprovider"],
         env=os.environ | {f"{module.upper()}_TARGET": target}, capture_output=True, text=True,
     )
 
 
-@pytest.mark.parametrize("module, solution", [("m0", "m0_basics"), ("m2", "m2_react")])
-def test_trainer_reference_solutions_pass_checkpoint(module, solution):
-    result = _run_exercise_checkpoint(module, f"trainer.exercises.solutions.{solution}")
+@pytest.mark.parametrize("module", sorted(EXERCISES))
+def test_trainer_reference_solutions_pass_checkpoint(module):
+    result = _run_exercise_checkpoint(module, f"trainer.exercises.solutions.{EXERCISES[module]}")
     assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize("module", sorted(EXERCISES))
+def test_trainer_shipped_exercises_are_unsolved(module):
+    assert _run_exercise_checkpoint(module, f"trainer.exercises.{EXERCISES[module]}").returncode != 0
 
 
 def test_trainer_m2_exercise_stubs_are_unsolved():
     import trainer.exercises.m2_react as stubs
 
-    assert _run_exercise_checkpoint("m2", "trainer.exercises.m2_react").returncode != 0
     with pytest.raises(NotImplementedError):
         stubs.run_react(lambda t: None, {}, "task", "answer")
 

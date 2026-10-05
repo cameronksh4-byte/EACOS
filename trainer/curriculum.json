@@ -197,7 +197,7 @@
         35,
         48
       ],
-      "build_status": "partial",
+      "build_status": "ready",
       "why": "This is the product's moat. Business owners don't fear AI - they fear customer bank details in someone else's logs, and an AI that can be talked into approving a bad invoice.",
       "objectives": [
         "Reversible PII tokenization: sanitize -> process -> rehydrate, with leakage measured",
@@ -217,34 +217,44 @@
       ],
       "code_along": [
         {
+          "title": "Build the primitives yourself",
+          "file": "trainer/exercises/m3_security.py",
+          "task": "Implement luhn_valid, looks_like_injection, disallowed_domains and is_safe_expression. Run `check M3` after each."
+        },
+        {
           "title": "Read the sanitizer",
           "file": "auditgate/security/sanitizer.py",
-          "task": "Follow one value from Detector -> _spans -> _resolve_overlaps -> Vault.token_for -> rehydrate."
+          "task": "Follow one value from Detector -> _spans -> _resolve_overlaps -> Vault.token_for -> rehydrate. Find where already-masked values are re-masked."
         },
         {
-          "title": "See policy above the model",
-          "file": "auditgate/agent/resolver.py",
-          "task": "Read enforce_policy(). The agent can never approve an invoice with audit errors, whatever it says. Write a test that tries."
+          "title": "Indirect injection",
+          "file": "auditgate/security/injection.py + evals/golden_dataset.json",
+          "task": "Run the eval and look at inv_prompt_injection and inv_hidden_injection. Then write a NEW injection phrasing that slips past detect_injection - and notice the structural defenses still hold: numbers unchanged, policy unchanged."
         },
         {
-          "title": "Attack it",
-          "file": "auditgate/evals/golden_dataset.json",
-          "task": "Write a case designed to leak (e.g. a phone number written as 512 555 0147). Watch the eval fail, then fix the detector."
+          "title": "Egress",
+          "file": "auditgate/security/egress.py",
+          "task": "Read check_egress and enforce_policy in agent/resolver.py. Try making the scripted demo's draft email include a link: watch the verdict become escalate."
         },
         {
-          "title": "[coming in a later stage] Injection evals vs real models",
-          "file": "auditgate/evals/",
-          "task": "Run injection cases against LLM backends, not just the heuristic extractor."
+          "title": "Sandbox",
+          "file": "auditgate/security/sandbox.py",
+          "task": "Run run_restricted('result = total > 5000', {'total': 6000}). Then try to break out (imports, open(), __class__). Read the 'Honest limits' note: when do you need a container instead?"
         },
         {
-          "title": "[coming in a later stage] Sandbox & statutory rules",
-          "file": "auditgate/security/",
-          "task": "Restricted tool execution and dated, cited statutory assertions (e.g. lien-notice deadlines) - each rule verified against the actual statute."
+          "title": "Compliance rules above the LLM",
+          "file": "auditgate/security/compliance.py",
+          "task": "Create a RuleSet with payment_deadline_rule using a deadline from a REAL statute or contract you look up yourself - cite it and fill in verified_by/verified_on. Run process_text with it and read the finding."
+        },
+        {
+          "title": "Injection vs a real model (needs an API key)",
+          "file": "(terminal)",
+          "task": "uv run python -m auditgate.evals.runner --provider anthropic (or local). Do inv_prompt_injection's numbers still come out right?"
         }
       ],
-      "checkpoint": "uv run pytest tests/test_pipeline.py -k m3 -q --tb=line",
+      "checkpoint": "uv run pytest trainer/exercises/test_m3_security.py tests -k m3 -q --tb=line",
       "milestone": "No raw PII reaches a model, injected instructions can't change a verdict, and policy can't be overridden by the LLM.",
-      "stretch": "Encrypt the Vault at rest with a per-session key."
+      "stretch": "Run the sandbox runner inside Docker (--network none --read-only --memory 256m) and compare."
     },
     {
       "id": "M4",

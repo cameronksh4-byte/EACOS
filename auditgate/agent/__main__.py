@@ -116,11 +116,13 @@ def main(
         raise typer.Exit(code=2)
     report = process_text(cases[case]["text"], DocumentType(cases[case]["doc_type"]),
                           settings=Settings(provider="heuristic"))
+    settings = Settings.from_env()
     if provider == "scripted":
         model = demo_script(report)
     else:
-        model = build_model(Settings.from_env().model_copy(update={"provider": provider}))
-    render(resolve(report, model, max_steps=max_steps), report)
+        model = build_model(settings.model_copy(update={"provider": provider}))
+    render(resolve(report, model, max_steps=max_steps,
+                   allowed_domains=tuple(settings.egress_allowed_domains)), report)
 
 
 if __name__ == "__main__":

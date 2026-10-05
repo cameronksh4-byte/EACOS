@@ -28,6 +28,7 @@ from auditgate.agent.models import AnthropicModel, Model, OpenAICompatibleModel
 from auditgate.agent.tools import Tool, ToolRegistry
 from auditgate.config import Settings
 from auditgate.pipeline import AuditReport, Status
+from auditgate.security.egress import check_egress
 from auditgate.security.sanitizer import Sanitizer
 
 DATA_PATH = Path(__file__).with_name("data") / "vendors.json"
@@ -166,9 +167,13 @@ def document_total(report: AuditReport) -> Decimal | None:
     return Decimal(str(value)) if value is not None else None
 
 
-def enforce_policy(resolution: Resolution, report: AuditReport) -> tuple[Resolution, list[str]]:
+def enforce_policy(resolution: Resolution, report: AuditReport,
+                   allowed_domains: tuple[str, ...] = ()) -> tuple[Resolution, list[str]]:
     """Deterministic rules that override the model. Returns the (possibly changed) resolution and why."""
     violations: list[str] = []
+    outbound = f"{resolution.summary}\n{resolution.draft_email or ''}"
+    for v in check_egress(outbound, allowed_domains):
+        violations.append(f"Egress: {v.kind} ({v.detail}) in text that would leave the system.")
     if resolution.verdict is Verdict.APPROVE and report.status is Status.FAIL:
         violations.append("Policy: a document with audit errors cannot be auto-approved.")
     total = document_total(report)
@@ -194,6 +199,7 @@ def resolve(
     store: VendorStore | None = None,
     sanitizer: Sanitizer | None = None,
     max_steps: int = 6,
+    allowed_domains: tuple[str, ...] = (),
 ) -> ResolveResult:
     run = run_agent(model, build_registry(store), system=SYSTEM_PROMPT, task=_task(report),
                     final_tool="submit_resolution", max_steps=max_steps,
@@ -201,7 +207,7 @@ def resolve(
     if run.final is None:
         return ResolveResult(status="escalated", resolution=None,
                              policy_violations=[f"Agent did not finish within {max_steps} steps."], run=run)
-    resolution, violations = enforce_policy(run.final, report)  # type: ignore[arg-type]
+    resolution, violations = enforce_policy(run.final, report, allowed_domains)  # type: ignore[arg-type]
     status = "escalated" if resolution.verdict is Verdict.ESCALATE else "resolved"
     return ResolveResult(status=status, resolution=resolution, policy_violations=violations, run=run)
 
