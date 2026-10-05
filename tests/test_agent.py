@@ -252,3 +252,12 @@ def test_m2_openai_adapter_formats_and_survives_bad_json():
     assert turn.tool_calls[0].arguments == {INVALID_JSON_KEY: "{text: oops"}
     result, _ = REGISTRY.execute(turn.tool_calls[0])
     assert result.is_error and "not valid JSON" in result.content
+
+
+@pytest.mark.parametrize("case_id", [c for c in CASES if CASES[c]["pii_values"]])
+def test_m2_no_golden_pii_reaches_the_agent_model(case_id):
+    """Extracted fields like bill_to lose their 'Attn:' label; they must still be masked."""
+    model = ScriptedModel([])
+    resolve(report_for(case_id), model, max_steps=1)
+    first_message = model.seen[0][0]
+    assert [v for v in CASES[case_id]["pii_values"] if v in first_message] == []

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from auditgate import api, pipeline
 from auditgate.agent.__main__ import demo_script
-from auditgate.agent.graph import IdempotencyStore, ResolutionService
+from auditgate.agent.graph import IdempotencyStore, ResolutionService, initial_state
 from auditgate.agent.models import ModelTurn, ScriptedModel, ToolCall
 from auditgate.config import Settings
 from auditgate.evals.runner import load_cases
@@ -209,3 +209,9 @@ def test_m4_batch_is_bounded_and_ordered(tmp_path, monkeypatch):
     assert [r.status.value for r in reports] == ["pass", "fail", "pass", "fail"] * 2
     with pytest.raises(ValueError):
         asyncio.run(process_batch(paths, concurrency=0))
+
+
+@pytest.mark.parametrize("case_id", [c for c in CASES if CASES[c]["pii_values"]])
+def test_m4_no_golden_pii_in_graph_state_sent_to_model(case_id):
+    task = initial_state(report_for(case_id))["transcript"][0]["text"]
+    assert [v for v in CASES[case_id]["pii_values"] if v in task] == []

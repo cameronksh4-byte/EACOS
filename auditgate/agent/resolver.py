@@ -29,7 +29,7 @@ from auditgate.agent.tools import Tool, ToolRegistry
 from auditgate.config import Settings
 from auditgate.pipeline import AuditReport, Status
 from auditgate.security.egress import check_egress
-from auditgate.security.sanitizer import Sanitizer
+from auditgate.security.sanitizer import Sanitizer, seed_vault
 
 DATA_PATH = Path(__file__).with_name("data") / "vendors.json"
 CENT = Decimal("0.01")
@@ -200,10 +200,12 @@ def resolve(
     sanitizer: Sanitizer | None = None,
     max_steps: int = 6,
     allowed_domains: tuple[str, ...] = (),
+    otel_tracer: Any = None,
 ) -> ResolveResult:
     run = run_agent(model, build_registry(store), system=SYSTEM_PROMPT, task=_task(report),
                     final_tool="submit_resolution", max_steps=max_steps,
-                    sanitizer=sanitizer if sanitizer is not None else Sanitizer(spacy_model=None))
+                    sanitizer=sanitizer if sanitizer is not None else Sanitizer(spacy_model=None),
+                    vault=seed_vault(report.data), otel_tracer=otel_tracer)
     if run.final is None:
         return ResolveResult(status="escalated", resolution=None,
                              policy_violations=[f"Agent did not finish within {max_steps} steps."], run=run)

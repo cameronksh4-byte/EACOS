@@ -138,6 +138,23 @@ class SanitizedText:
         return [v for v in sensitive_values if v and v in self.text]
 
 
+# Extracted fields that hold personal data. Once text has become structured JSON, a name is
+# just a value - no "Attn:" label left for the detectors to anchor on - so mask by field.
+PERSONAL_FIELDS: dict[str, str] = {"bill_to": "PERSON", "contact": "PERSON", "customer_name": "PERSON",
+                                   "site_address": "ADDRESS"}
+
+
+def seed_vault(data: dict[str, Any] | None, vault: Vault | None = None,
+               fields: dict[str, str] = PERSONAL_FIELDS) -> Vault:
+    """Register personal field values in the vault so every later sanitize() masks them everywhere."""
+    vault = vault or Vault()
+    for name, label in fields.items():
+        value = (data or {}).get(name)
+        if isinstance(value, str) and value.strip() and not TOKEN_RE.fullmatch(value):
+            vault.token_for(label, value)
+    return vault
+
+
 class Sanitizer:
     def __init__(
         self,

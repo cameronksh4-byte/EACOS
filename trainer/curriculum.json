@@ -332,7 +332,7 @@
         64,
         75
       ],
-      "build_status": "planned",
+      "build_status": "ready",
       "why": "Tools should be reusable across any AI client, and every decision an agent makes should be traceable afterwards. Auditors - and your clients - will ask 'why did it do that?'",
       "objectives": [
         "Expose AuditGate's tools through a Model Context Protocol (MCP) server",
@@ -349,24 +349,39 @@
       ],
       "code_along": [
         {
-          "title": "Read the step trace you already have",
-          "file": "auditgate/agent/loop.py",
-          "task": "AgentRun.steps records tool calls, latency and tokens. This becomes the OTel span data."
+          "title": "Build it by hand first",
+          "file": "trainer/exercises/m5_protocols.py",
+          "task": "Implement prompt_version, MiniTracer.span, safe_attributes, cost_usd and handle_mcp_request (raw JSON-RPC). Run `check M5` after each."
         },
         {
-          "title": "[coming in a later stage] MCP server",
+          "title": "Read the MCP server",
           "file": "auditgate/mcp_server.py",
-          "task": "Serve lookup_vendor_history, find_purchase_orders and audit_document over MCP."
+          "task": "Notice the tools call the SAME registry as the agent (one implementation, two front doors), and every response is sanitized because MCP clients may be hosted models."
         },
         {
-          "title": "[coming in a later stage] OpenTelemetry",
-          "file": "auditgate/observability.py",
-          "task": "Spans per step, exported to the console and to a local collector."
+          "title": "Connect a real client",
+          "file": "(your MCP client's settings)",
+          "task": "Add AuditGate to an MCP client using the config in mcp_server.py's docstring. Ask it to audit a golden-dataset invoice and look up the vendor."
+        },
+        {
+          "title": "Read the tracing",
+          "file": "auditgate/observability.py + agent/loop.py",
+          "task": "Find where agent.run, agent.step and tool.* spans are created, and which attributes are deliberately NOT recorded."
+        },
+        {
+          "title": "See a trace",
+          "file": "(terminal)",
+          "task": "uv run python -c \"from auditgate import observability as o; o.configure('console'); import runpy; runpy.run_module('auditgate.agent', run_name='__main__')\" - read the JSON spans printed for each step."
+        },
+        {
+          "title": "Cost per run",
+          "file": "(.env)",
+          "task": "Set AUDITGATE_PRICES to your provider's current per-million-token prices (look them up - they change), run the agent with a real provider, and read agent.cost_usd."
         }
       ],
-      "checkpoint": "uv run pytest tests/test_pipeline.py -k m5 -q --tb=line",
+      "checkpoint": "uv run pytest trainer/exercises/test_m5_protocols.py tests -k m5 -q --tb=line",
       "milestone": "Any MCP client can use AuditGate's tools, and every agent run leaves a complete, PII-free trace.",
-      "stretch": "Add a cost dashboard: tokens and dollars per document, per vendor, per month."
+      "stretch": "Send traces to a local Jaeger (docker run jaegertracing/all-in-one) via OTLP and browse a run's timeline."
     },
     {
       "id": "M6",

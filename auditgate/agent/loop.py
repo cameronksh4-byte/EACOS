@@ -19,8 +19,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
+from opentelemetry.trace import Tracer
 from pydantic import BaseModel
 
+from auditgate import observability as obs
 from auditgate.agent.models import Model, ModelTurn, ToolCall, ToolResult, TranscriptItem
 from auditgate.agent.tools import ToolRegistry
 from auditgate.security.sanitizer import Sanitizer, Vault
@@ -71,40 +73,64 @@ def run_agent(
     final_tool: str,
     max_steps: int = 6,
     sanitizer: Sanitizer | None = None,
+    otel_tracer: Tracer | None = None,
+    vault: Vault | None = None,
 ) -> AgentRun:
     if final_tool not in registry.names:
         raise ValueError(f"final tool {final_tool!r} is not registered")
-    vault = Vault()
+    vault = vault if vault is not None else Vault()
     hide = (lambda text: sanitizer.sanitize(text, vault).text) if sanitizer else (lambda text: text)
+    tracer = otel_tracer or obs.tracer()
 
     transcript: list[TranscriptItem] = [hide(task)]
     run = AgentRun(status="budget_exhausted", final=None, transcript=transcript)
 
-    for index in range(1, max_steps + 1):
-        started = time.perf_counter()
-        turn: ModelTurn = model.complete(system, transcript, registry.specs())
-        latency = (time.perf_counter() - started) * 1000
-        transcript.append(turn)
+    with tracer.start_as_current_span("agent.run", attributes={
+        "agent.model": model.name, "agent.prompt_version": obs.prompt_version(system),
+        "agent.max_steps": max_steps, "agent.final_tool": final_tool,
+    }) as run_span:
+        for index in range(1, max_steps + 1):
+            with tracer.start_as_current_span("agent.step", attributes={"step.index": index}) as step_span:
+                started = time.perf_counter()
+                turn: ModelTurn = model.complete(system, transcript, registry.specs())
+                latency = (time.perf_counter() - started) * 1000
+                transcript.append(turn)
 
-        results: list[ToolResult] = []
-        for call in turn.tool_calls:
-            real_call = ToolCall(id=call.id, name=call.name, arguments=vault.rehydrate(call.arguments))
-            result, parsed = registry.execute(real_call)
-            result.content = hide(result.content)
-            if call.name == final_tool and parsed is not None:
-                run.final = parsed
-            results.append(result)
+                results: list[ToolResult] = []
+                for call in turn.tool_calls:
+                    with tracer.start_as_current_span(f"tool.{call.name}") as tool_span:
+                        real_call = ToolCall(id=call.id, name=call.name, arguments=vault.rehydrate(call.arguments))
+                        result, parsed = registry.execute(real_call)
+                        result.content = hide(result.content)
+                        # Argument NAMES only and a sanitized excerpt: traces must never hold raw PII.
+                        tool_span.set_attributes({"tool.is_error": result.is_error,
+                                                  "tool.argument_names": sorted(call.arguments),
+                                                  "tool.result_excerpt": obs.truncate(result.content)})
+                    if call.name == final_tool and parsed is not None:
+                        run.final = parsed
+                    results.append(result)
 
-        run.steps.append(Step(index=index, text=turn.text, tool_calls=turn.tool_calls, results=results,
-                              latency_ms=round(latency, 1), input_tokens=turn.input_tokens,
-                              output_tokens=turn.output_tokens))
-        if run.final is not None:
-            run.status = "completed"
-            break
-        if results:
-            transcript.append(results)
-        else:
-            transcript.append(f"You did not call a tool. Use the tools to investigate, "
-                              f"then call {final_tool} with your answer.")
+                step_span.set_attributes({"step.latency_ms": round(latency, 1),
+                                          "step.input_tokens": turn.input_tokens,
+                                          "step.output_tokens": turn.output_tokens,
+                                          "step.tools": [c.name for c in turn.tool_calls]})
+            run.steps.append(Step(index=index, text=turn.text, tool_calls=turn.tool_calls, results=results,
+                                  latency_ms=round(latency, 1), input_tokens=turn.input_tokens,
+                                  output_tokens=turn.output_tokens))
+            if run.final is not None:
+                run.status = "completed"
+                break
+            if results:
+                transcript.append(results)
+            else:
+                transcript.append(f"You did not call a tool. Use the tools to investigate, "
+                                  f"then call {final_tool} with your answer.")
+
+        tokens_in, tokens_out = run.tokens
+        run_span.set_attributes({"agent.status": run.status, "agent.steps": len(run.steps),
+                                 "agent.repairs": run.repairs, "agent.input_tokens": tokens_in,
+                                 "agent.output_tokens": tokens_out})
+        cost = obs.cost_usd(model.name, tokens_in, tokens_out)
+        if cost is not None:
+            run_span.set_attribute("agent.cost_usd", float(cost))
     return run
-

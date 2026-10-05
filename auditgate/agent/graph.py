@@ -32,6 +32,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from auditgate import observability as obs
 from auditgate.agent.models import Model, ModelTurn, ToolCall, ToolResult, TranscriptItem
 from auditgate.agent.resolver import (
     SYSTEM_PROMPT,
@@ -43,7 +44,9 @@ from auditgate.agent.resolver import (
     enforce_policy,
 )
 from auditgate.pipeline import AuditReport
-from auditgate.security.sanitizer import Sanitizer, Vault
+from auditgate.security.sanitizer import Sanitizer, Vault, seed_vault
+
+PROMPT_VERSION = obs.prompt_version(SYSTEM_PROMPT)
 
 
 class ResolverState(TypedDict, total=False):
@@ -200,7 +203,7 @@ def thread_key(state: ResolverState) -> str:
 
 def initial_state(report: AuditReport, sanitizer: Sanitizer | None = None) -> ResolverState:
     sanitizer = sanitizer or Sanitizer(spacy_model=None)
-    hidden = sanitizer.sanitize(_task(report))
+    hidden = sanitizer.sanitize(_task(report), seed_vault(report.data))
     return {"report": report.model_dump(mode="json"), "transcript": [{"kind": "user", "text": hidden.text}],
             "vault": dict(hidden.vault.token_to_value), "steps": 0, "repairs": 0, "resolution": None,
             "violations": [], "review_reason": None, "decision": None, "outcome": None}
@@ -283,7 +286,8 @@ class IdempotencyStore:
 class ResolutionService:
     """Start, inspect and resume durable resolver runs. One thread per document."""
 
-    def __init__(self, model: Model, db_path: str | Path, **graph_kwargs: Any) -> None:
+    def __init__(self, model: Model, db_path: str | Path, *, otel_tracer: Any = None, **graph_kwargs: Any) -> None:
+        self.tracer = otel_tracer or obs.tracer()
         self.db_path = Path(db_path)
         self.checkpointer = open_checkpointer(self.db_path)
         self.outbox = Outbox(self.db_path)
@@ -295,8 +299,12 @@ class ResolutionService:
         return {"configurable": {"thread_id": thread_id}}
 
     def start(self, report: AuditReport, thread_id: str) -> dict[str, Any]:
-        self.graph.invoke(initial_state(report), self._config(thread_id))
-        return self.status(thread_id)
+        with self.tracer.start_as_current_span("resolution.start", attributes={"thread_id": thread_id}) as span:
+            self.graph.invoke(initial_state(report), self._config(thread_id))
+            status = self.status(thread_id)
+            span.set_attributes({"resolution.state": status["state"], "agent.steps": status["steps"],
+                                 "agent.repairs": status["repairs"], "agent.prompt_version": PROMPT_VERSION})
+        return status
 
     def status(self, thread_id: str) -> dict[str, Any]:
         snapshot = self.graph.get_state(self._config(thread_id))
@@ -324,5 +332,10 @@ class ResolutionService:
             self.graph.invoke(Command(resume=decision), self._config(thread_id))
             return self.status(thread_id)
 
-        result, replayed = self.events.run_once(idempotency_key, apply)
+        with self.tracer.start_as_current_span("human.decision", attributes={
+            "thread_id": thread_id, "human.decision": str(decision.get("decision")),
+            "human.approver": str(decision.get("approver", "unknown")), "idempotency_key": idempotency_key,
+        }) as span:
+            result, replayed = self.events.run_once(idempotency_key, apply)
+            span.set_attributes({"human.replayed": replayed, "resolution.outcome": str(result.get("outcome"))})
         return result | {"replayed": replayed}
