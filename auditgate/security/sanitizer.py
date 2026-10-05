@@ -63,6 +63,9 @@ _LABEL_VALUE = r"[:#\s]*(?:No\.?|Number|#)?[:#\s]*"
 
 DETECTORS: list[Detector] = [
     Detector("EMAIL", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    # "maria at example dot com" - spelled out to dodge the pattern above (found by synthetic evals).
+    Detector("EMAIL", re.compile(
+        r"(?i)\b[\w.+-]+\s+(?:at|\(at\)|\[at\])\s+[\w-]+(?:\s+(?:dot|\(dot\)|\[dot\])\s+[a-z0-9-]{2,24})+\b")),
     Detector("IBAN", re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){3,7}(?: ?[A-Z0-9]{1,3})?\b")),
     Detector("CREDIT_CARD", re.compile(r"\b(?:\d[ -]?){12,18}\d\b"), validate=luhn_valid),
     Detector("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), validate=_ssn_valid),

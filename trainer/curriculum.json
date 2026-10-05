@@ -393,7 +393,7 @@
         76,
         90
       ],
-      "build_status": "partial",
+      "build_status": "ready",
       "why": "'It worked in my demo' doesn't sell. A scored, repeatable eval is your safety net, your release gate, and your best sales asset.",
       "objectives": [
         "Grow the golden dataset to 40+ cases, including model-generated adversarial inputs",
@@ -414,34 +414,44 @@
       ],
       "code_along": [
         {
-          "title": "Run the gate",
-          "file": "auditgate/evals/runner.py",
-          "task": "uv run python -m auditgate.evals.runner --report eval_report.json and read every metric."
+          "title": "Build the metrics yourself",
+          "file": "trainer/exercises/m6_evals.py",
+          "task": "Implement exact_match, precision_recall, pass_at_k, regressions, cosine and nearest. Run `check M6` after each."
         },
         {
-          "title": "Polish the UI",
-          "file": "auditgate/ui.py",
-          "task": "uv run streamlit run auditgate/ui.py - add a batch upload tab and an export-to-Excel button."
+          "title": "Run both gates",
+          "file": "(terminal)",
+          "task": "uv run python -m auditgate.evals.runner --dataset all   and   uv run python -m auditgate.evals.agent_runner. Read every metric and what it would take to fail it."
         },
         {
-          "title": "[coming in a later stage] Agent evals & Pass@k",
-          "file": "auditgate/evals/",
-          "task": "Score the resolver agent on verdict accuracy, tool-selection precision/recall and Pass@k."
+          "title": "Synthetic data finds real bugs",
+          "file": "auditgate/evals/synth.py",
+          "task": "Read the mutations. Two of them (spelled_email, noisy_layout) found real bugs that were then fixed - find the fixes in sanitizer.py and extractor.py. Write a NEW mutation, regenerate, and see if it breaks something."
         },
         {
-          "title": "[coming in a later stage] CI + synthetic data",
-          "file": ".github/workflows/",
-          "task": "Run tests and evals on every push; generate adversarial cases; cluster failures."
+          "title": "Score a real model, before and after",
+          "file": "(terminal, needs an API key)",
+          "task": "agent_runner --provider anthropic -n 3 -k 3 --report before.json; change one line of SYSTEM_PROMPT in agent/resolver.py; rerun with --baseline before.json. Did Pass@1 move?"
         },
         {
-          "title": "Sell it",
-          "file": "sales_collateral/client_pitch.md",
-          "task": "Customise the pitch for one niche (e.g. property managers). Book three demos."
+          "title": "Cluster the failures",
+          "file": "auditgate/evals/cluster.py",
+          "task": "Run the cluster command on any report with failures. Do the clusters point at root causes you can fix once?"
+        },
+        {
+          "title": "CI",
+          "file": "/.github/workflows/ci.yml",
+          "task": "Push a branch and watch the CI run tests plus both eval gates. Then trigger the live-agent job by hand (needs an ANTHROPIC_API_KEY secret)."
+        },
+        {
+          "title": "Polish & sell",
+          "file": "auditgate/ui.py + sales_collateral/client_pitch.md",
+          "task": "Add a batch-upload tab and an export-to-Excel button to the dashboard. Put your eval numbers in the pitch, then book three demos."
         }
       ],
-      "checkpoint": "uv run pytest tests/test_pipeline.py -k m6 -q --tb=line",
+      "checkpoint": "uv run pytest trainer/exercises/test_m6_evals.py tests -k m6 -q --tb=line",
       "milestone": "A demo-ready, evaluated, local-first product with a release gate and a pitch.",
-      "stretch": "Publish an anonymised eval report as part of your sales collateral."
+      "stretch": "Grow the agent cases to 20 using model-proposed candidates (synth --propose), reviewing each by hand before adding it."
     }
   ]
 }

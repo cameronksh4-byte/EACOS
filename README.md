@@ -2,10 +2,12 @@
 
 This repository has two parts that are meant to be used together:
 
-1. **`trainer/`** is a code-along CLI that diagnoses where you're starting from and walks you through a 90-day AI engineering sprint (adjustable from 60 to 180 days) in seven modules: from Python basics, through hand-built agents, to evaluation engineering.
-2. **`auditgate/`** is the product you build along the way. **AuditGate** is a local-first engine that extracts and audits invoices, bids and work orders, made for business owners who don't trust public AI models with private data or with getting numbers right.
+1. **`trainer/`** is a code-along CLI. It diagnoses where you're starting from, then walks you through a 120-day (or 60–180-day) AI engineering curriculum in seven modules, from Python basics to hand-built agents, durable state graphs, MCP, OpenTelemetry and evaluation engineering.
+2. **`auditgate/`** is the product you build along the way. **AuditGate** is a local-first engine that extracts and audits invoices, bids and work orders, and an agent that resolves the exceptions. It's made for business owners who don't trust public AI models with private data or with getting numbers right.
 
-> The existing EACOS reference folders (`architecture/`, `frameworks/`, `governance/`, `tutorials/`, …) are unchanged. `tutorials/langgraph` is the suggested follow-on for Module 4's stretch goal.
+Every module pairs a **hands-on exercise** (you write the code; tests grade it) with the **production version** inside AuditGate, so you build each idea once by hand and then see how it holds up in a real system.
+
+> The existing EACOS reference folders (`architecture/`, `frameworks/`, `governance/`, `tutorials/`, …) are unchanged. `tutorials/langgraph` is part of Module 4.
 
 ---
 
@@ -13,25 +15,24 @@ This repository has two parts that are meant to be used together:
 
 ```bash
 # Python 3.12+ and uv required (https://docs.astral.sh/uv/)
-uv sync                                   # create .venv and install everything
-cp .env.example .env                      # default provider "heuristic" is 100% offline
+uv sync                                          # create .venv and install everything
+cp .env.example .env                             # default provider "heuristic" is 100% offline
 
-uv run python -m trainer.cli assess       # 1. diagnostic, about 15 minutes (add --days 120 for a steadier pace)
-uv run python -m trainer.cli plan         # 2. your calibrated 90-day plan
-uv run python -m trainer.cli module M0    # 3. start learning (M0 is skipped if you already know Python)
-
-uv run pytest                             # full test suite
-uv run python -m auditgate.evals.runner   # eval gate: accuracy, schema adherence, PII leakage
-uv run streamlit run auditgate/ui.py      # dashboard at http://localhost:8501
-uv run uvicorn auditgate.api:app          # local REST API at http://127.0.0.1:8000/docs
-uv run python -m auditgate.agent          # exception-resolution agent, offline scripted demo
+uv run python -m trainer.cli assess --days 120   # 1. diagnostic, about 15 minutes
+uv run python -m trainer.cli plan                # 2. your calibrated schedule
+uv run python -m trainer.cli module M0           # 3. start learning (M0 is skipped if you already know Python)
+uv run python -m trainer.cli check M0            # 4. grade your exercise
 ```
 
-Optional NER-based name detection (better at catching names written in free text):
+Everything else:
 
 ```bash
-uv pip install "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
-uv run python -m auditgate.evals.runner --spacy
+uv run pytest                                    # full test suite
+uv run python -m trainer.cli eval                # both eval gates (documents + agent), offline
+uv run streamlit run auditgate/ui.py             # dashboard at http://localhost:8501
+uv run uvicorn auditgate.api:app                 # local REST API at http://127.0.0.1:8000/docs
+uv run python -m auditgate.agent                 # exception-resolution agent, offline scripted demo
+uv run python -m auditgate.mcp_server            # AuditGate as an MCP server (stdio)
 ```
 
 ---
@@ -40,108 +41,124 @@ uv run python -m auditgate.evals.runner --spacy
 
 | Command | What it does |
 |---|---|
-| `assess` | 16 questions in 8 domains (Python data structures, API mechanics, validation schemas, orchestration, data security, tool calling, state & persistence, observability), weighted by difficulty. Press `s` to skip a question instead of guessing. `--answers "a,b,..."` runs it non-interactively; `--days 120` sets the sprint length. |
-| `plan` | Your schedule. Each module is set to **fast-track**, **accelerated** or **full** based on your score in its domain. Days you save on what you already know go to your weak spots. |
-| `modules` / `module M0` | Overview, objectives, key concepts, code-along steps tied to real files, checkpoint, milestone and stretch goal. Each module shows a build status: **ready**, **partial** (some steps are marked *coming in a later stage*) or **planned**. |
-| `check M0` | Runs that module's checkpoint tests and records completion. |
-| `eval` | Runs the AuditGate eval gate. |
+| `assess` | 16 questions across 8 areas, weighted by difficulty. Press `s` to skip a question instead of guessing. `--answers "a,b,..."` runs it non-interactively; `--days 120` sets the sprint length (60–180). |
+| `plan` | Your schedule. Each module is set to **fast-track**, **accelerated** or **full** based on your score in its area. Days saved on what you already know go to your weak areas. Module 0 is skipped entirely if you score 80% or more on Python. |
+| `modules` / `module M2` | Overview, objectives, key concepts, code-along steps tied to real files, checkpoint, milestone and stretch goal. |
+| `check M2` | Grades your exercise and the module's production tests, and records completion. Each failure is one line telling you what's left. |
+| `eval` | Runs the document and agent evaluation gates. |
 | `status` | Where you are and what to do next. |
 
 **Levels:** Foundation (<35%) → Builder (35–60%) → Practitioner (60–85%) → Architect (≥85%).
 
-**Module 0** is for anyone who isn't yet comfortable reading Python. It only appears in your plan if you scored below 80% on Python data structures; otherwise it's skipped and its days go to other modules. Write your answers in `trainer/exercises/m0_basics.py` and check them with `check M0`. Each passing test is one finished exercise. Reference solutions are in `trainer/exercises/solutions/`; try the exercises yourself before you look.
-
-**Module 2** works the same way. In `trainer/exercises/m2_react.py` you build the four parts of an agent yourself: a tool schema, error feedback, safe tool execution and the loop. A fake model drives the tests, so you don't need an API key. Then compare your version with the production one in `auditgate/agent/`.
-
 ### The modules
 
-| # | Module | You build | Status |
+| # | Module | Your exercise (`trainer/exercises/`) | Production code you then study |
 |---|---|---|---|
-| M0 | Python Basics *(optional)* | `trainer/exercises/m0_basics.py`: 10 invoice-themed exercises, ending with fixing a data-leak bug | ready |
-| M1 | Typed Data Contracts & Static Validation | `extraction/schemas.py`: Pydantic schemas, deterministic audit rules, mypy | ready |
-| M2 | Agents from Scratch: Tool Calling & Self-Correction | `trainer/exercises/m2_react.py`, then `auditgate/agent/`: a hand-built ReAct loop over the raw SDKs | ready |
-| M3 | Security, Guardrails & Deterministic Compliance | `security/sanitizer.py`, the agent's `enforce_policy`; injection evals, sandboxing and statutory rules come later | partial |
-| M4 | State Graphs, Persistence & Human Review | `pipeline.py`, `api.py`; LangGraph, SQLite checkpoints and idempotent webhooks come later | partial |
-| M5 | Tool Protocols (MCP) & Observability (OpenTelemetry) | MCP server and OTel traces | planned |
-| M6 | Evaluation Engineering, CI & Shipping | `evals/`, `ui.py`, pitch; Pass@k, synthetic data, clustering and CI come later | partial |
+| M0 | Python Basics *(optional)* | `m0_basics.py`: 10 invoice-themed exercises, ending with fixing a data-leak bug | — |
+| M1 | Typed Data Contracts & Static Validation | code-along in the real schemas, plus mypy | `extraction/schemas.py` |
+| M2 | Agents from Scratch: Tool Calling & Self-Correction | `m2_react.py`: tool schema, error feedback, safe execution, the ReAct loop | `agent/models.py`, `tools.py`, `loop.py`, `resolver.py` |
+| M3 | Security, Guardrails & Deterministic Compliance | `m3_security.py`: Luhn, injection detection, link allowlist, safe-expression check | `security/` (sanitizer, injection, egress, sandbox, compliance) |
+| M4 | State Graphs, Persistence & Human Review | `m4_graphs.py`: router, SQLite checkpointer, pause/resume runner, exactly-once handler | `agent/graph.py`, `api.py`, `pipeline.process_batch` |
+| M5 | Tool Protocols (MCP) & Observability (OpenTelemetry) | `m5_protocols.py`: prompt versions, mini tracer, PII-safe attributes, cost, raw JSON-RPC MCP | `mcp_server.py`, `observability.py` |
+| M6 | Evaluation Engineering, CI & Shipping | `m6_evals.py`: exact match, precision/recall, Pass@k, regressions, cosine/nearest | `evals/` (metrics, runners, synth, cluster), `.github/workflows/ci.yml` |
+
+Reference solutions are in `trainer/exercises/solutions/`. Try each exercise yourself before you look; the struggle is where the learning happens. The test suite checks that every solution passes and that every shipped exercise starts unsolved.
 
 ---
 
 ## AuditGate architecture
 
 ```
- file (PDF/XLSX/CSV/TXT)
-        │  load_text()            local only: pdfplumber / pandas
+ file (PDF/XLSX/CSV/TXT) ─► load_text()                            local only
+        │
+        ├─► detect_injection() ──► POSSIBLE_PROMPT_INJECTION (review)   strip invisible characters
         ▼
-   raw text ──► Sanitizer ──► "Attn: [[PERSON_1]] … Acct #: [[BANK_ACCOUNT_1]]"     ◄─ outbound_payload
-        │        │ Vault (stays local)          │
-        │        │                              ▼
-        │        │                  Extractor (heuristic | local LLM | OpenAI | Anthropic)
-        │        │                              │  structured output via instructor
-        │        ▼                              ▼
-        │   rehydrate() ◄──────────── dict with placeholders
+   Sanitizer ─► "Attn: [[PERSON_1]] … Acct #: [[BANK_ACCOUNT_1]]"       Vault stays on this machine
         ▼
-  Pydantic schema validation ──► audit() rules ──► AuditReport: PASS / REVIEW / FAIL + findings
+   Extractor (heuristic | local LLM | OpenAI | Anthropic)              structured output
+        ▼
+   rehydrate ─► Pydantic validation ─► audit() rules ─► compliance RuleSet ─► AuditReport (PASS / REVIEW / FAIL)
+                                                                                    │ FAIL / REVIEW
+                                                                                    ▼
+   Resolver agent: ReAct loop or LangGraph ─► tools (vendor history, POs, calculator) ─► Resolution
+        ▼                                                  every step traced (OpenTelemetry)
+   enforce_policy() + egress check  ─►  human_review (pauses, survives restarts)  ─►  outbox (exactly once)
 ```
 
-Design decisions worth understanding:
+### Design decisions worth understanding
 
-- **Schemas capture what's on the page; audits decide whether it adds up.** Arithmetic checks are deliberately *not* Pydantic validators. Instructor sends validation errors back to the model and retries, which would push the model to *invent* numbers that balance and hide the overbilling we're trying to catch.
-- **Everything is sanitized, even when the backend is local.** It's defense in depth, and it gives every backend the same code path, so leakage can be measured the same way for all of them.
-- **The offline heuristic extractor is a real backend, not a mock.** It's the zero-trust default and the baseline every LLM has to beat in evals.
-- **Failures become findings, not exceptions.** A timeout or bad model output turns into `EXTRACTION_FAILED` with status FAIL, and the batch keeps going.
+- **Schemas capture what's on the page; audits decide whether it adds up.** Arithmetic checks are deliberately not validators, because retry-on-validation would push the model to invent numbers that balance.
+- **The model never does arithmetic.** The agent has to use the `line_total`, `add_amounts` and `overcharge` tools.
+- **Policy sits above the model.** Plain Python rules override any model output. An invoice with audit errors is never auto-approved, a disputed amount can't exceed the document total, and outbound text can't contain unknown links or bank, card or tax identifiers.
+- **PII boundary everywhere.** Models, MCP clients and traces only see placeholders. Tools run on real values locally. Values are masked by detectors, by label, by field (`bill_to`, `contact`, …), and wherever they reappear in the same run.
+- **Errors are returned, not raised.** Tool failures go back to the model as precise, actionable messages (field, problem, what was sent), so it can fix its own call.
+- **Durable by default.** The graph version checkpoints to SQLite after every node. A dispute can wait days for a human and resume after a restart, and a retried approval webhook only acts once.
 
-### Exception-resolution agent (`auditgate/agent/`)
+### Agent, two ways
 
-When a document fails the audit, the agent investigates and proposes **approve**, **dispute** (with the exact overcharge and a draft email) or **escalate**. It's a ReAct loop written by hand against the raw Anthropic and OpenAI SDKs, with no agent framework:
+| | `agent/loop.py` (Module 2) | `agent/graph.py` (Module 4) |
+|---|---|---|
+| Shape | a `while` loop with a step budget | a LangGraph `StateGraph`: agent, tools, repair, nudge, policy, human_review, finalize |
+| On a bad tool call | the error goes back in the transcript | routed to a **repair** node; too many repairs routes to a human |
+| Human in the loop | — | `interrupt()` at `human_review`; resume via `POST /webhooks/approval` |
+| Persistence | in memory | SQLite checkpoints (`ResolutionService`), idempotent webhooks, outbox |
 
-```
-task (sanitized report) ─► model ─► tool calls ─► registry.execute() ─► results (errors included) ─┐
-                             ▲                     args rehydrated,        re-sanitized             │
-                             └─────────────────────────────────────────────────────────────────────┘
-                 stops when submit_resolution validates · or after max_steps → escalate to a human
-                                         ▼
-                 enforce_policy(): plain Python rules the model can't override
-```
+### Evaluation gates
 
-- **Tool schemas come from Pydantic models**, so the schema the model sees is exactly what gets validated.
-- **Errors are returned, not raised.** Validation errors name each field and what was sent. Exceptions report their type and location. Unknown tools list the valid ones. Arguments that aren't valid JSON are reported back instead of crashing the loop.
-- **PII boundary:** the model only ever sees placeholders. Tools run on real values locally, and their output is sanitized again before the model sees it. Any value masked once stays masked for the rest of the run.
-- **The model never does arithmetic.** It has to use the `line_total`, `add_amounts` and `overcharge` tools.
-- **Policy sits above the model.** An invoice with audit errors is never auto-approved, and a disputed amount can never exceed the document total.
-- **`--provider scripted`** replays a fixed run, including one deliberate mistake, so you can watch the self-correction offline. Use `--provider anthropic|openai|local` for a real model.
-
-### Eval gates (`auditgate/evals/runner.py`)
+**Documents** (`evals/runner.py`, 12 golden + 32 synthetic cases)
 
 | Metric | Gate |
 |---|---|
 | field_accuracy | ≥ 95% |
 | status_accuracy | ≥ 90% |
 | finding_recall | ≥ 90% |
-| schema_adherence (valid documents parse, broken ones are rejected) | 100% |
-| PII values in the outbound payload | **0** |
+| schema_adherence | 100% |
+| PII values in outbound payloads | **0** |
 
-The golden dataset has 11 edge cases: line-item math errors, inflated totals, a missing total, EUR with US-style dates, a due date before the issue date, a document heavy with PII, a prompt injection, bid sums that don't match, an emergency work order with no cap, and a work order with no tasks. The runner exits non-zero if any gate fails, so you can use it as a CI step.
+**Agent** (`evals/agent_runner.py`, 8 cases with recorded reference runs)
+
+| Metric | Gate (real model) | Gate (replay) |
+|---|---|---|
+| Pass@1 (and Pass@k with `-n`/`-k`) | ≥ 75% | 100% |
+| Schema compliance (valid answers ÷ answers submitted) | ≥ 80% | 100% |
+| Tool-selection recall / precision | ≥ 80% / ≥ 70% | 100% |
+| Forbidden verdicts (e.g. approving an injected invoice) | **0** | **0** |
+
+Use `--baseline before.json` to compare against an earlier run after changing a prompt or model; any regression beyond 5 points fails the run. **Synthetic data** (`evals/synth.py`) applies mutations whose expected answers are computed, not guessed. The first run found two real bugs: spelled-out emails leaked, and spaced-out layouts broke bid parsing. Both are fixed. **Clustering** (`evals/cluster.py`) groups failures by root cause, using TF-IDF offline or any embedding model. **CI** (`.github/workflows/ci.yml`) runs the tests and both gates on every push. A manually triggered job scores a real model.
 
 ### Known limitations (be honest with clients about these)
 
 - The heuristic extractor expects `Label: value` layouts. Scanned images need OCR first, and free-form layouts need an LLM backend.
-- Detection based on regexes and labels catches structured identifiers reliably. Names written in free text need the optional spaCy model, and small NER models sometimes redact more than necessary (for example, business names). Over-redacting is harmless because values are restored afterwards; under-redacting is what the leakage gate is there to catch.
-- Street-address detection covers common US formats only.
+- The real-model paths (Anthropic, OpenAI, Ollama) are built against the raw SDKs and tested with fake clients, but scoring them needs your API key or a local model.
+- Injection detection is a signal, not a guarantee. The structural defenses (data-only prompts, policy above the model, egress checks) are what hold when someone finds a new phrasing.
+- The sandbox (allowlisted syntax plus a restricted subprocess) is defense in depth, not a container. For hostile code, run it in a locked-down container or microVM.
+- **Compliance rules ship as templates, with no legal values.** You supply each number from the actual statute or contract, cite it and record who verified it. Unverified rules can only warn.
+- Name detection relies on labels and fields; free-text names need the optional spaCy model. Street-address detection covers common US formats.
+- Checkpoint databases contain the PII vault. Keep them on the machine (they're git-ignored).
+
+Optional NER-based name detection:
+
+```bash
+uv pip install "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+uv run python -m auditgate.evals.runner --spacy
+```
 
 ---
 
 ## Project layout
 
 ```
-.env.example                 configuration template (never commit .env)
+.env.example                    configuration template (never commit .env)
+.github/workflows/ci.yml        tests + both eval gates on every push
 sales_collateral/client_pitch.md
-trainer/      cli.py · assessment.py · assessment_bank.json · curriculum.json
-auditgate/    config.py · pipeline.py · api.py · ui.py
-              agent/models.py · agent/tools.py · agent/loop.py · agent/resolver.py · agent/data/
-              security/sanitizer.py
-              extraction/schemas.py · extraction/extractor.py
-              evals/runner.py · evals/golden_dataset.json
-trainer/exercises/           m0_basics.py · m2_react.py (yours to edit) · test_*.py · solutions/
-tests/                       test_pipeline.py · test_agent.py; names prefixed m1–m6 / trainer → per-module checkpoints
+trainer/        cli.py · assessment.py · assessment_bank.json · curriculum.json
+trainer/exercises/              m0 · m2 · m3 · m4 · m5 · m6 exercises (yours to edit) · test_*.py · solutions/
+auditgate/      config.py · pipeline.py · api.py · ui.py · mcp_server.py · observability.py
+  agent/        models.py · tools.py · loop.py · resolver.py · graph.py · data/vendors.json
+  security/     sanitizer.py · injection.py · egress.py · sandbox.py · compliance.py
+  extraction/   schemas.py · extractor.py
+  evals/        runner.py · agent_runner.py · metrics.py · synth.py · cluster.py
+                golden_dataset.json · synthetic_dataset.json · agent_cases.json
+tests/          test_pipeline · test_agent · test_security · test_graph · test_protocols · test_evals
+                (test names prefixed m1–m6 / trainer → per-module checkpoints)
 ```

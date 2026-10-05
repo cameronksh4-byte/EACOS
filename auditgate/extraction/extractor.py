@@ -70,7 +70,10 @@ def _field(text: str, *labels: str) -> str | None:
 
 
 def _section(text: str, *headers: str) -> list[str]:
-    """Bulleted/numbered lines that follow a header line, until a blank or new header."""
+    """Bulleted/numbered lines that follow a header line, until the first non-bullet line.
+
+    Blank lines between bullets are allowed (spaced-out layouts are common in exported PDFs).
+    """
     m = re.search(r"(?im)^[ \t]*(?:" + "|".join(headers) + r")[ \t]*:?[ \t]*$", text)
     if not m:
         return []
@@ -78,8 +81,6 @@ def _section(text: str, *headers: str) -> list[str]:
     for line in text[m.end():].splitlines():
         stripped = line.strip()
         if not stripped:
-            if lines:
-                break
             continue
         bullet = re.match(r"^(?:[-*•]|\d+[.)])\s+(.*)$", stripped)
         if not bullet:

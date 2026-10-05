@@ -205,9 +205,21 @@ def check(module_id: str) -> None:
 
 
 @app.command("eval")
-def eval_cmd(provider: str = typer.Option("heuristic", help="heuristic | local | openai | anthropic")) -> None:
-    """Run the AuditGate evaluation gate."""
-    raise typer.Exit(code=subprocess.call([sys.executable, "-m", "auditgate.evals.runner", "--provider", provider]))
+def eval_cmd(
+    suite: str = typer.Option("all", help="docs | agent | all"),
+    provider: str = typer.Option(None, help="Document extractor (heuristic|local|openai|anthropic) and/or agent "
+                                            "model (replay|local|openai|anthropic). Defaults are offline."),
+) -> None:
+    """Run the AuditGate evaluation gates: document extraction and/or the resolver agent."""
+    code = 0
+    if suite in ("docs", "all"):
+        doc_provider = provider if provider not in (None, "replay") else "heuristic"
+        code |= subprocess.call([sys.executable, "-m", "auditgate.evals.runner", "--dataset", "all",
+                                 "--provider", doc_provider])
+    if suite in ("agent", "all"):
+        agent_provider = provider if provider not in (None, "heuristic") else "replay"
+        code |= subprocess.call([sys.executable, "-m", "auditgate.evals.agent_runner", "--provider", agent_provider])
+    raise typer.Exit(code=code)
 
 
 @app.command()

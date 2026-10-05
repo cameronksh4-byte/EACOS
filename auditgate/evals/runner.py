@@ -97,13 +97,14 @@ def run_evals(
     sanitizer: Sanitizer | None = None,
     settings: Settings | None = None,
     dataset: Path = DATASET,
+    cases: list[dict[str, Any]] | None = None,
 ) -> EvalReport:
     settings = settings or Settings()
     sanitizer = sanitizer or Sanitizer(spacy_model=None)
     results: list[CaseResult] = []
     pii_total = pii_leaked = 0
 
-    for case in load_cases(dataset):
+    for case in cases if cases is not None else load_cases(dataset):
         exp = case["expected"]
         report = process_text(case["text"], DocumentType(case["doc_type"]),
                               settings=settings, extractor=extractor, sanitizer=sanitizer)
@@ -186,13 +187,17 @@ def main(
     provider: str = typer.Option(None, help="heuristic | local | openai | anthropic (default: from .env)"),
     report_path: Path = typer.Option(None, "--report", help="Write the full JSON report here"),
     spacy: bool = typer.Option(False, help="Also use the spaCy NER model configured in .env"),
+    dataset: str = typer.Option("golden", help="golden | synthetic | all | path/to/cases.json"),
 ) -> None:
     settings = Settings.from_env()
     if provider:
         settings = settings.model_copy(update={"provider": provider})
     sanitizer = Sanitizer(deny_terms=settings.deny_terms, redact_orgs=settings.redact_orgs,
                           spacy_model=settings.spacy_model if spacy else None)
-    report = run_evals(build_extractor(settings), sanitizer=sanitizer, settings=settings)
+    synthetic = DATASET.with_name("synthetic_dataset.json")
+    paths = {"golden": [DATASET], "synthetic": [synthetic], "all": [DATASET, synthetic]}.get(dataset, [Path(dataset)])
+    cases = [c for path in paths for c in load_cases(path)]
+    report = run_evals(build_extractor(settings), sanitizer=sanitizer, settings=settings, cases=cases)
     render(report, Console())
     if report_path:
         report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")

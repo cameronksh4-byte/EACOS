@@ -1,0 +1,56 @@
+# Tests and evaluation gates on every push and pull request.
+# The live-model job runs only when started by hand (Actions tab -> CI -> Run workflow)
+# and needs an ANTHROPIC_API_KEY repository secret.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live_agent_eval:
+        description: "Also score the agent against a real model (uses API credits)"
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install dependencies (exactly as locked)
+        run: uv sync --frozen
+      - name: Unit, integration and exercise-solution tests
+        run: uv run pytest -q
+      - name: Document eval gate (golden + synthetic)
+        run: uv run python -m auditgate.evals.runner --dataset all --report doc_eval.json
+      - name: Agent eval gate (recorded reference runs)
+        run: uv run python -m auditgate.evals.agent_runner --report agent_eval_replay.json
+      - name: Keep the eval reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports
+          path: "*_eval*.json"
+
+  live-agent-eval:
+    if: github.event_name == 'workflow_dispatch' && inputs.live_agent_eval
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: Pass@1 and Pass@3 against a real model
+        run: uv run python -m auditgate.evals.agent_runner --provider anthropic -n 3 -k 3 --report agent_eval_live.json
+      - name: Cluster any failures
+        if: always()
+        run: uv run python -m auditgate.evals.cluster agent_eval_live.json -k 3
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-agent-eval
+          path: agent_eval_live.json
