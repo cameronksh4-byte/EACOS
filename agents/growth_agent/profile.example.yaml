@@ -1,0 +1,41 @@
+# Copy to profile.yaml and make it yours. Everything the agent writes is
+# tailored to this file, so the more specific you are, the better the ideas.
+
+founder:
+  name: Cameron
+  skills: [Python, AI agents / LangGraph, automation, writing]
+  industries_i_know: [small business operations, ministry / nonprofits]
+  audience_i_can_reach: small business owners and church admins on LinkedIn
+  time_per_week_hours: 15
+  monthly_budget_usd: 200
+  goals: first $1,000 MRR within 90 days
+  values: >
+    Honest, servant-hearted marketing. Help first, sell second.
+    No exaggerated claims, fake scarcity or manipulative urgency.
+  voice: warm, practical, plain-spoken; teaches with concrete examples
+  avoid: [crypto, gambling, adult content, anything requiring VC funding]
+
+scoring:
+  # How much each 1-10 axis counts toward the 0-100 total.
+  weights: {pain: 1.2, willingness_to_pay: 1.5, reach: 1.2, speed_to_revenue: 1.5, build_ease: 1.0}
+
+social:
+  # dryrun (log only) | ayrshare | webhook. Can be overridden by the
+  # GROWTH_AGENT_PUBLISHER env var, e.g. in GitHub Actions.
+  publisher: dryrun
+  # auto   = posts that pass the AI brand-safety review publish on schedule.
+  # manual = posts wait for `python -m growth_agent approve <id|all>`.
+  approval: auto
+  platforms: [linkedin, x]
+  posts_per_day_per_platform: 1
+  plan_days: 7          # days of content to write at a time
+  min_queue_days: 3     # refill when fewer than this many days are queued
+  timezone: America/New_York
+  # Link used in posts. {idea_id} is replaced. Uncomment once the landing page is live.
+  # link_template: https://cameronksh4-byte.github.io/EACOS/{idea_id}/
+  # Our platform name -> Ayrshare platform name, if they differ.
+  platform_map: {x: twitter}
+
+lead_capture:
+  # Where the landing page's email form posts. Formspree is free to start.
+  form_action: https://formspree.io/f/your-form-id
