@@ -18,6 +18,9 @@ from .schemas import (ContentPlan, IdeaDraft, IdeaList, IdeaScore, LaunchKit,
 T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
+# The hourly autopilot only writes and reviews short posts, so it runs on the
+# much cheaper Haiku. Brainstorm and launch keep DEFAULT_MODEL.
+AUTOPILOT_MODEL = "claude-haiku-5-5"
 
 
 class LLM(Protocol):
@@ -96,7 +99,7 @@ class FakeLLM:
         raise ValueError(f"FakeLLM has no canned answer for {schema.__name__}")
 
 
-def get_llm() -> LLM:
+def get_llm(model: str | None = None) -> LLM:
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return ClaudeLLM()
+        return ClaudeLLM(model)
     return FakeLLM()

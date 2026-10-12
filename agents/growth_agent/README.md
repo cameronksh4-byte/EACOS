@@ -65,6 +65,10 @@ That's it. Every hour the workflow publishes the posts that are due, writes the 
 | `publish` | Publish posts that are due now |
 | `autopilot` | `publish`, then refill content (what the hourly job runs) |
 
+## Models and cost
+
+`brainstorm` and `launch` use Claude Sonnet 5.5 for the thinking-heavy work. The hourly `autopilot` only writes and reviews short posts, so it uses Claude Haiku 5.5, which costs about a twentieth as much per token. It also skips the model entirely when every launched idea already has enough posts queued. To change either model, set `GROWTH_AGENT_MODEL` or `GROWTH_AGENT_AUTOPILOT_MODEL`.
+
 ## Safety rails (because nobody checks each post)
 
 - Every post goes through a **separate reviewer pass** that rejects or fixes invented statistics, fake testimonials, spammy or manipulative tone, platform-rule risks and off-voice copy. A post the reviewer didn't explicitly approve is held back.

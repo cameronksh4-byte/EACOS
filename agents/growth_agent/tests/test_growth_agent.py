@@ -132,3 +132,11 @@ def test_landing_page_escapes_html(store):
     html = render_landing(store.idea(idea_id), kit, "https://formspree.io/f/abc")
     assert "<script>x" not in html and "&lt;script&gt;" in html
     assert 'action="https://formspree.io/f/abc"' in html
+
+
+def test_autopilot_uses_cheaper_model(monkeypatch):
+    from growth_agent.llm import AUTOPILOT_MODEL, DEFAULT_MODEL, get_llm
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.delenv("GROWTH_AGENT_MODEL", raising=False)
+    assert get_llm().chat.model == DEFAULT_MODEL
+    assert get_llm(AUTOPILOT_MODEL).chat.model == "claude-haiku-5-5"

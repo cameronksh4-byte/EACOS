@@ -20,7 +20,7 @@ import yaml
 from .autopilot import publish_due, refill_content
 from .graphs import build_brainstorm_graph, build_launch_graph
 from .landing import write_landing
-from .llm import FakeLLM, get_llm
+from .llm import AUTOPILOT_MODEL, FakeLLM, get_llm
 from .publishers import get_publisher
 from .store import Store
 
@@ -60,7 +60,8 @@ def main(argv: list[str] | None = None):
 
     profile = load_profile(args.profile)
     store = Store()
-    llm = get_llm()
+    llm = get_llm(os.environ.get("GROWTH_AGENT_AUTOPILOT_MODEL", AUTOPILOT_MODEL)
+                  if args.cmd == "autopilot" else None)
     if isinstance(llm, FakeLLM) and args.cmd in ("brainstorm", "launch", "autopilot"):
         print("(no ANTHROPIC_API_KEY - using offline sample answers)\n")
 
