@@ -1,0 +1,132 @@
+/* Valley AgentWorks — scroll-through hero.
+   Brand tokens below are placeholders: swap in the live site's colors and fonts. */
+.sh {
+  --sh-bg: #05070a;
+  --sh-text: #ffffff;
+  --sh-muted: rgba(255, 255, 255, 0.82);
+  --sh-accent: #f28c38;        /* placeholder: copper, picked from the video */
+  --sh-accent-text: #1a0d02;
+  --sh-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --sh-scroll: 400vh;          /* how much scrolling the whole video takes */
+
+  position: relative;
+  height: var(--sh-scroll);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font-family: var(--sh-font);
+}
+
+.sh__stage {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100svh;
+  overflow: hidden;
+}
+
+.sh__canvas,
+.sh__poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Darkens the bottom so captions stay readable on every frame. */
+.sh__stage::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.75) 0%, rgba(0, 0, 0, 0.15) 45%, rgba(0, 0, 0, 0) 70%);
+  pointer-events: none;
+}
+
+.sh__captions {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.sh__caption {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: max(10vh, 48px);
+  margin: 0;
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+  font-size: clamp(1.5rem, 4.5vw, 3rem);
+  font-weight: 700;
+  line-height: 1.15;
+  text-wrap: balance;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
+}
+
+.sh__caption.is-active {
+  opacity: 1;
+  transform: none;
+}
+
+.sh__caption--final h1 {
+  margin: 0 0 0.4em;
+  font-size: clamp(2rem, 6vw, 4rem);
+  line-height: 1.05;
+}
+
+.sh__caption--final p {
+  margin: 0 0 1.2em;
+  font-size: clamp(1rem, 2.2vw, 1.25rem);
+  font-weight: 400;
+  color: var(--sh-muted);
+}
+
+.sh__cta {
+  display: inline-block;
+  padding: 0.85em 1.4em;
+  border-radius: 999px;
+  background: var(--sh-accent);
+  color: var(--sh-accent-text);
+  font-size: 1.05rem;
+  font-weight: 700;
+  text-decoration: none;
+  text-shadow: none;
+}
+
+.sh__cta:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
+.sh__hint {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  z-index: 1;
+  transform: translateX(-50%);
+  font-size: 0.85rem;
+  color: var(--sh-muted);
+  transition: opacity 0.3s ease;
+}
+
+.sh.is-scrolled .sh__hint { opacity: 0; }
+
+/* Static mode — one still frame with the final message — whenever scrubbing is off:
+   no JS, reduced motion (the <head> snippet then never adds .sh-js), or frames failed (.sh--off).
+   Deciding this in <head> keeps the section's height fixed from first paint: no layout shift. */
+html:not(.sh-js) .sh, .sh.sh--off { height: auto; }
+html:not(.sh-js) .sh__stage, .sh--off .sh__stage { position: relative; }
+html:not(.sh-js) .sh__canvas, .sh--off .sh__canvas,
+html:not(.sh-js) .sh__hint, .sh--off .sh__hint,
+html:not(.sh-js) .sh__caption:not(.sh__caption--final),
+.sh--off .sh__caption:not(.sh__caption--final) { display: none; }
+html:not(.sh-js) .sh__caption--final,
+.sh--off .sh__caption--final { opacity: 1; transform: none; transition: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sh__caption { transition: none; }
+}

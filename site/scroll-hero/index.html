@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Valley AgentWorks — scroll hero demo</title>
+  <!-- 1) Must be in <head>: turns scrubbing on before first paint (no layout shift), off for reduced motion. -->
+  <script>if(!matchMedia("(prefers-reduced-motion: reduce)").matches)document.documentElement.classList.add("sh-js")</script>
+  <link rel="preload" as="image" href="poster.webp" fetchpriority="high">
+  <link rel="stylesheet" href="scroll-hero.css">
+  <style>
+    /* Demo page only — not part of the component. */
+    body { margin: 0; background: #05070a; color: #fff; font-family: system-ui, sans-serif; }
+    .demo-bar { position: fixed; top: 12px; right: 16px; z-index: 10; }
+    .demo-bar button { font: inherit; padding: 6px 12px; border-radius: 999px; border: 1px solid #fff; background: rgba(0,0,0,.5); color: #fff; cursor: pointer; }
+    .demo-next { padding: 64px 16px; max-width: 760px; margin: 0 auto; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <div class="demo-bar">
+    <button type="button" onclick="var h=document.documentElement;h.lang=h.lang==='es'?'en':'es';this.textContent=h.lang==='es'?'English':'Español'">Español</button>
+  </div>
+
+  <!-- 2) The component. Paste this where the hero goes. -->
+  <section class="sh" data-src="frames/" data-frames="150" aria-label="Valley AgentWorks introduction">
+    <div class="sh__stage">
+      <picture>
+        <!-- Reduced motion shows the closing frame, which matches the final message. -->
+        <source srcset="poster-end.webp" media="(prefers-reduced-motion: reduce)">
+        <img class="sh__poster" src="poster.webp" width="1280" height="720" alt="" fetchpriority="high">
+      </picture>
+      <canvas class="sh__canvas" aria-hidden="true"></canvas>
+      <p class="sh__hint" aria-hidden="true" data-es="Desplázate ↓">Scroll ↓</p>
+      <div class="sh__captions">
+        <p class="sh__caption" data-from="0.04" data-to="0.24"
+           data-es="Cada llamada es un trabajo.">Every call is a job.</p>
+        <p class="sh__caption" data-from="0.30" data-to="0.50"
+           data-es="Cuando suena el buzón de voz, el cliente marca al siguiente contratista.">When it rings out to voicemail, the customer dials the next contractor.</p>
+        <p class="sh__caption" data-from="0.56" data-to="0.78"
+           data-es="La IA contesta, agenda y da seguimiento — de día o de noche.">AI answers, books and follows up — day or night.</p>
+        <div class="sh__caption sh__caption--final" data-from="0.84" data-to="1">
+          <h1 data-es="Deje de perder trabajos por el buzón de voz">Stop losing jobs to voicemail</h1>
+          <p data-es="Para contratistas de HVAC, techos, plomería y electricidad en el Valle del Río Grande.">For HVAC, roofing, plumbing and electrical contractors in the Rio Grande Valley.</p>
+          <a class="sh__cta" href="/book" data-es="Reserve una auditoría gratis">Book a free audit</a>
+        </div>
+      </div>
+    </div>
+  </section>
+  <script src="scroll-hero.js" defer></script>
+
+  <main class="demo-next">
+    <h2>The rest of your page continues here</h2>
+    <p>Everything after the hero scrolls normally once the video has played through.</p>
+  </main>
+</body>
+</html>
