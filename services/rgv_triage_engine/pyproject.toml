@@ -1,0 +1,49 @@
+[project]
+name = "rgv-triage-engine"
+version = "1.0.0"
+description = "Security-first FastAPI backend that triages US-Mexico cross-border freight documents."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.12",
+    "pydantic-settings>=2.6",
+    "instructor>=1.17",
+    "anthropic[bedrock]>=1.15",
+    "boto3>=1.40",
+    "asyncpg>=0.30",
+    "httpx>=0.28",
+    "defusedxml>=0.7.1",
+    "dkimpy>=1.1.8",
+    "pyspf>=2.0.14",
+    "dnspython>=2.7",
+    "anyio>=4.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.8", "mypy>=1.13"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "BLE", "N", "RUF", "S"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # Spanish text (á, é, ñ) is intentional
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S603", "S607", "S608", "S314", "N803"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["triage_engine", "conftest"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true

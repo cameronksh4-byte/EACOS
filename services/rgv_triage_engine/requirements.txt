@@ -1,0 +1,14 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.12
+pydantic-settings>=2.6
+instructor>=1.17
+anthropic[bedrock]>=1.15
+boto3>=1.40
+asyncpg>=0.30
+httpx>=0.28
+defusedxml>=0.7.1
+dkimpy>=1.1.8
+pyspf>=2.0.14
+dnspython>=2.7
+anyio>=4.6

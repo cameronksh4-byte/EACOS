@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<cfdi:Comprobante xmlns:cfdi="http://www.sat.gob.mx/cfd/4"
+    xmlns:tfd="http://www.sat.gob.mx/TimbreFiscalDigital"
+    xmlns:cartaporte31="http://www.sat.gob.mx/CartaPorte31"
+    xmlns:cce20="http://www.sat.gob.mx/ComercioExterior20"
+    Version="4.0" Serie="A" Folio="1001" Fecha="2026-10-14T08:30:00"
+    SubTotal="30000.00" Moneda="USD" TipoCambio="17.2500" Total="30000.00"
+    TipoDeComprobante="I" Exportacion="02" MetodoPago="PUE" LugarExpedicion="88500">
+  <cfdi:Emisor Rfc="EXP010101AB1" Nombre="EXPORTADORA DEL BRAVO" RegimenFiscal="601"/>
+  <cfdi:Receptor Rfc="XEXX010101000" Nombre="VALLEY PRODUCE LLC" DomicilioFiscalReceptor="88500"
+      RegimenFiscalReceptor="616" UsoCFDI="S01"/>
+  <cfdi:Conceptos>
+    <cfdi:Concepto ClaveProdServ="50301700" NoIdentificacion="AGU-HASS" Cantidad="960"
+        ClaveUnidad="XBX" Unidad="Caja" Descripcion="Aguacate Hass"
+        ValorUnitario="25.00" Importe="24000.00" ObjetoImp="02">
+      <cfdi:Impuestos><cfdi:Traslados>
+        <cfdi:Traslado Base="24000.00" Impuesto="002" TipoFactor="Tasa" TasaOCuota="0.000000" Importe="0.00"/>
+      </cfdi:Traslados></cfdi:Impuestos>
+    </cfdi:Concepto>
+    <cfdi:Concepto ClaveProdServ="50303300" NoIdentificacion="LIM-PERSA" Cantidad="240"
+        ClaveUnidad="XBX" Unidad="Caja" Descripcion="Limon persa"
+        ValorUnitario="25.00" Importe="6000.00" ObjetoImp="02">
+      <cfdi:Impuestos><cfdi:Traslados>
+        <cfdi:Traslado Base="6000.00" Impuesto="002" TipoFactor="Tasa" TasaOCuota="0.000000" Importe="0.00"/>
+      </cfdi:Traslados></cfdi:Impuestos>
+    </cfdi:Concepto>
+  </cfdi:Conceptos>
+  <cfdi:Impuestos TotalImpuestosTrasladados="0.00">
+    <cfdi:Traslados>
+      <cfdi:Traslado Base="30000.00" Impuesto="002" TipoFactor="Tasa" TasaOCuota="0.000000" Importe="0.00"/>
+    </cfdi:Traslados>
+  </cfdi:Impuestos>
+  <cfdi:Complemento>
+    <cce20:ComercioExterior Version="2.0" ClaveDePedimento="A1" CertificadoOrigen="0" Incoterm="FCA"
+        TipoCambioUSD="17.2500" TotalUSD="30000.00">
+      <cce20:Mercancias>
+        <cce20:Mercancia NoIdentificacion="AGU-HASS" FraccionArancelaria="0804400100"
+            CantidadAduana="10800" UnidadAduana="01" ValorUnitarioAduana="2.22" ValorDolares="24000.00"/>
+        <cce20:Mercancia NoIdentificacion="LIM-PERSA" FraccionArancelaria="0805500200"
+            CantidadAduana="790" UnidadAduana="01" ValorUnitarioAduana="7.59" ValorDolares="6000.00"/>
+      </cce20:Mercancias>
+    </cce20:ComercioExterior>
+    <cartaporte31:CartaPorte Version="3.1" TranspInternac="Sí" EntradaSalidaMerc="Salida"
+        PaisOrigenDestino="USA" ViaEntradaSalida="01" TotalDistRec="15">
+      <cartaporte31:Mercancias PesoBrutoTotal="11590.000" UnidadPeso="KGM" NumTotalMercancias="2">
+        <cartaporte31:Mercancia BienesTransp="50301700" Descripcion="Aguacate Hass" Cantidad="960"
+            ClaveUnidad="XBX" PesoEnKg="9150.000"/>
+        <cartaporte31:Mercancia BienesTransp="50303300" Descripcion="Limon persa" Cantidad="240"
+            ClaveUnidad="XBX" PesoEnKg="2440.000"/>
+      </cartaporte31:Mercancias>
+      <cartaporte31:FiguraTransporte>
+        <cartaporte31:TiposFigura TipoFigura="01" RFCFigura="GOMJ800101AB1" NumLicencia="BCN0012345"
+            NombreFigura="CONDUCTOR DE PRUEBA"/>
+      </cartaporte31:FiguraTransporte>
+    </cartaporte31:CartaPorte>
+    <tfd:TimbreFiscalDigital Version="1.1" UUID="6F1C2A3B-4D5E-4F60-8172-93A4B5C6D7E8"
+        FechaTimbrado="2026-10-14T08:31:02" RfcProvCertif="SAT970701NN3"
+        SelloCFD="dGVzdA==" NoCertificadoSAT="00001000000500000000" SelloSAT="dGVzdA=="/>
+  </cfdi:Complemento>
+</cfdi:Comprobante>
