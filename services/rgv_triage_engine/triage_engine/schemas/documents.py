@@ -472,11 +472,15 @@ class ReconciliationFinding(_StrictModel):
 
 
 class TriageDisposition(StrEnum):
-    """Routing outcome for a load."""
+    """The engine's proofreading result. Advisory only.
 
-    CLEAR = "CLEAR"  # documents agree; proceed to filing
-    REVIEW = "REVIEW"  # data gaps; a broker should look
-    HOLD = "HOLD"  # documents disagree; do not file until resolved
+    No disposition authorises entry or filing: every packet still needs a
+    licensed broker's sign-off (see :mod:`triage_engine.schemas.review`).
+    """
+
+    CLEAR = "CLEAR"  # no discrepancies found; ready for broker review
+    REVIEW = "REVIEW"  # data gaps; broker should verify missing figures
+    HOLD = "HOLD"  # documents disagree; broker must resolve or override in writing
 
 
 def disposition_for(findings: list[ReconciliationFinding]) -> TriageDisposition:

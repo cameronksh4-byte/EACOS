@@ -20,6 +20,9 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 #: 19 CFR 163.4(a): entry records must be kept for 5 years from the date of
 #: entry. 1,827 days covers five years including leap days.
 MIN_CBP_RETENTION_DAYS = 1827
+#: Records are locked at triage time, which precedes the entry date the
+#: 163.4 clock starts from; a 90-day margin covers the gap.
+DEFAULT_RETENTION_DAYS = MIN_CBP_RETENTION_DAYS + 90
 
 TEN_MIB = 10 * 1024 * 1024
 
@@ -90,8 +93,18 @@ class Settings(BaseSettings):
     # --- Immutable audit trail -----------------------------------------
     audit_bucket: str = ""
     audit_kms_key_id: str | None = None
-    audit_retention_days: int = Field(default=MIN_CBP_RETENTION_DAYS)
+    audit_retention_days: int = Field(default=DEFAULT_RETENTION_DAYS)
     audit_key_prefix: str = "audit/v1"
+
+    # --- Broker sign-off (Supabase Auth) ------------------------------
+    #: ``https://<project-ref>.supabase.co/auth/v1``
+    supabase_jwt_issuer: str = ""
+    #: ``https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json``
+    supabase_jwks_url: str | None = None
+    #: Legacy shared JWT secret, only for projects without signing keys.
+    supabase_jwt_secret: SecretStr = SecretStr("")
+    #: Approvals require a multi-factor session (Supabase ``aal2``).
+    broker_approval_requires_mfa: bool = True
 
     # --- Triage rules --------------------------------------------------
     weight_variance_threshold_pct: Decimal = Decimal("3.0")
@@ -105,6 +118,22 @@ class Settings(BaseSettings):
         """Accept comma-separated strings for list settings."""
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("aws_region")
+    @classmethod
+    def _us_region_only(cls, value: str) -> str:
+        """Keep compute, inference and audit storage inside the United States."""
+        if not value.startswith("us-") or value.startswith("us-gov-"):
+            raise ValueError("aws_region must be a commercial US region (e.g. us-east-1)")
+        return value
+
+    @field_validator("bedrock_model_id")
+    @classmethod
+    def _no_global_inference_profile(cls, value: str) -> str:
+        """Reject cross-region profiles that may route inference outside the US."""
+        if value.startswith(("global.", "eu.", "apac.", "jp.", "au.")):
+            raise ValueError("bedrock_model_id must be an in-region or us. model ID")
         return value
 
     @field_validator("audit_retention_days")

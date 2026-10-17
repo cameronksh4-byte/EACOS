@@ -53,6 +53,8 @@ class AuditEventType(StrEnum):
     LLM_EXTRACTION_FAILED = "llm.extraction_failed"
     TRIAGE_PACKET_CREATED = "triage.packet_created"
     PROCESSING_FAILED = "processing.failed"
+    BROKER_REVIEW_RECORDED = "broker.review_recorded"
+    BROKER_REVIEW_DENIED = "broker.review_denied"
 
 
 class AuditIntegrityError(Exception):
@@ -142,6 +144,14 @@ class ObjectExistsError(Exception):
     """The conditional write failed because the key already exists."""
 
 
+@dataclass(frozen=True, slots=True)
+class ArchivedObject:
+    """Location and digest of a record archived under Object Lock."""
+
+    key: str
+    sha256: str
+
+
 class S3ObjectLockStore:
     """Writes audit records to an S3 bucket with Object Lock enabled.
 
@@ -225,7 +235,9 @@ class AuditLogger:
     Args:
         object_store: WORM store (S3 Object Lock in production).
         head_store: Chain-head lock and persistence.
-        key_prefix: Object key prefix.
+        key_prefix: Object key prefix for chain records.
+        archive_prefix: Object key prefix for archived business records
+            (full triage packets, broker reviews).
         clock: Injectable time source for tests.
     """
 
@@ -234,12 +246,30 @@ class AuditLogger:
         object_store: AuditObjectStore,
         head_store: ChainHeadStore,
         key_prefix: str = "audit/v1",
+        archive_prefix: str = "records/v1",
         clock: Any = None,
     ) -> None:
         self._objects = object_store
         self._heads = head_store
         self._prefix = key_prefix.strip("/")
+        self._archive_prefix = archive_prefix.strip("/")
         self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def archive(
+        self, *, tenant_id: UUID, kind: str, record_id: UUID, payload: Mapping[str, Any]
+    ) -> ArchivedObject:
+        """Write a full record (e.g. a triage packet) under Compliance-mode Object Lock.
+
+        The returned SHA-256 must be referenced from a chained audit event so
+        the archived object is covered by the hash chain.
+
+        Raises:
+            ObjectExistsError: If a record with this id was already archived.
+        """
+        body = canonical_json(payload)
+        key = f"{self._archive_prefix}/tenant={tenant_id}/{kind}/{record_id}.json"
+        await self._objects.put_record(key, body)
+        return ArchivedObject(key=key, sha256=hashlib.sha256(body).hexdigest())
 
     def key_for(self, tenant_id: UUID, sequence: int) -> str:
         """Object key for one record; zero-padded so keys sort by sequence."""

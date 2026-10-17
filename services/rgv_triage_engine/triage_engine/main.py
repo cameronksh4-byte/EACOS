@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from triage_engine.api import health, webhooks
+from triage_engine.api import health, packets, webhooks
 from triage_engine.config import Settings, get_settings
 from triage_engine.container import AppServices, build_services
 from triage_engine.logging_config import configure_logging
@@ -66,6 +66,7 @@ def create_app(settings: Settings | None = None, services: AppServices | None = 
 
     app.include_router(health.router)
     app.include_router(webhooks.router)
+    app.include_router(packets.router)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, __: RequestValidationError) -> JSONResponse:
@@ -77,7 +78,11 @@ def create_app(settings: Settings | None = None, services: AppServices | None = 
 
     @app.exception_handler(HTTPException)
     async def _http_error(_: Request, exc: HTTPException) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None),
+        )
 
     @app.exception_handler(Exception)
     async def _unhandled(_: Request, exc: Exception) -> JSONResponse:

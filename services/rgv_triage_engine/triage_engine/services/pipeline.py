@@ -248,6 +248,12 @@ class TriagePipeline:
             bol=bol.document,  # type: ignore[arg-type]
             threshold_pct=self._threshold,
         )
+        archived = await self._audit.archive(
+            tenant_id=tenant_id,
+            kind="triage-packet",
+            record_id=packet.packet_id,
+            payload=packet.model_dump(mode="json"),
+        )
         await self._repo.save_packet(tenant_id, packet, factura.id, bol.id)
         await self._audit.record(
             tenant_id=tenant_id,
@@ -261,6 +267,9 @@ class TriagePipeline:
                 "finding_codes": [f.code.value for f in packet.findings],
                 "factura_document_id": str(factura.id),
                 "bol_document_id": str(bol.id),
+                "archive_key": archived.key,
+                "packet_sha256": archived.sha256,
+                "review_status": "PENDING_BROKER_REVIEW",
             },
         )
         logger.info(

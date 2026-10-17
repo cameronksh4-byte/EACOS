@@ -16,6 +16,12 @@ from triage_engine.schemas.documents import (
     CrossBorderLoadTriagePacket,
     MexicanFacturaDocument,
 )
+from triage_engine.schemas.review import (
+    OPEN_REVIEW_STATUSES,
+    BrokerReviewRecord,
+    PacketSummary,
+    ReviewStatus,
+)
 from triage_engine.storage.audit import GENESIS_HASH, ChainHead
 from triage_engine.storage.db import resolve_channel_tenant, tenant_transaction
 
@@ -81,6 +87,24 @@ class TriageRepository(Protocol):
         bol_id: UUID,
     ) -> None:
         """Persist a triage packet and mark both documents as paired."""
+        ...
+
+    async def list_packets(
+        self, tenant_id: UUID, review_status: ReviewStatus | None, limit: int
+    ) -> list[PacketSummary]:
+        """Broker review queue, newest first."""
+        ...
+
+    async def get_packet(
+        self, tenant_id: UUID, packet_id: UUID
+    ) -> tuple[CrossBorderLoadTriagePacket, ReviewStatus] | None:
+        """One packet and its current review status, or None if not visible."""
+        ...
+
+    async def record_review(
+        self, tenant_id: UUID, review: BrokerReviewRecord, archive_key: str
+    ) -> bool:
+        """Store a decision if the packet is still open; False if it was closed."""
         ...
 
 
@@ -196,6 +220,87 @@ class PostgresTriageRepository:
                 packet.packet_id,
                 [factura_id, bol_id],
             )
+
+    async def list_packets(
+        self, tenant_id: UUID, review_status: ReviewStatus | None, limit: int
+    ) -> list[PacketSummary]:
+        async with tenant_transaction(self._pool, tenant_id) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, load_reference, disposition, review_status,
+                       weight_variance_pct::text AS weight_variance_pct, created_at
+                FROM public.triage_packets
+                WHERE ($1::text IS NULL OR review_status = $1)
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                review_status.value if review_status else None,
+                limit,
+            )
+        return [
+            PacketSummary(
+                packet_id=row["id"],
+                load_reference=row["load_reference"],
+                disposition=row["disposition"],
+                review_status=row["review_status"],
+                weight_variance_pct=row["weight_variance_pct"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    async def get_packet(
+        self, tenant_id: UUID, packet_id: UUID
+    ) -> tuple[CrossBorderLoadTriagePacket, ReviewStatus] | None:
+        async with tenant_transaction(self._pool, tenant_id) as conn:
+            row = await conn.fetchrow(
+                "SELECT packet, review_status FROM public.triage_packets WHERE id = $1",
+                packet_id,
+            )
+        if row is None:
+            return None
+        packet = CrossBorderLoadTriagePacket.model_validate_json(row["packet"])
+        return packet, ReviewStatus(row["review_status"])
+
+    async def record_review(
+        self, tenant_id: UUID, review: BrokerReviewRecord, archive_key: str
+    ) -> bool:
+        async with tenant_transaction(self._pool, tenant_id) as conn:
+            updated = await conn.fetchval(
+                """
+                UPDATE public.triage_packets
+                SET review_status = $2, reviewed_at = now()
+                WHERE id = $1 AND review_status = ANY($3::text[])
+                RETURNING id
+                """,
+                review.packet_id,
+                review.resulting_status.value,
+                sorted(s.value for s in OPEN_REVIEW_STATUSES),
+            )
+            if updated is None:
+                return False
+            await conn.execute(
+                """
+                INSERT INTO public.packet_reviews
+                    (id, tenant_id, packet_id, reviewer_id, decision, resulting_status,
+                     engine_disposition, packet_sha256, acknowledged_findings,
+                     override_reason, notes, archive_key)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                """,
+                review.review_id,
+                tenant_id,
+                review.packet_id,
+                review.reviewer_id,
+                review.decision.value,
+                review.resulting_status.value,
+                review.engine_disposition.value,
+                review.packet_sha256,
+                [code.value for code in review.acknowledged_findings],
+                review.override_reason,
+                review.notes,
+                archive_key,
+            )
+        return True
 
 
 class PostgresChainHeadStore:

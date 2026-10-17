@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from triage_engine.config import Settings
+from triage_engine.security.auth import SupabaseJWTVerifier
 from triage_engine.security.email_auth import EmailAuthenticator
 from triage_engine.services.extraction import BedrockExtractionService
 from triage_engine.services.ingestion import IngestionSanitizer
@@ -28,6 +29,7 @@ class AppServices:
     sanitizer: IngestionSanitizer
     pipeline: TriagePipeline
     email_authenticator: EmailAuthenticator
+    jwt_verifier: SupabaseJWTVerifier | None = None
     closers: list[Any] = field(default_factory=list)
 
     async def aclose(self) -> None:
@@ -62,6 +64,7 @@ async def build_services(settings: Settings) -> AppServices:
     pool = await create_pool(settings)
     closers: list[Any] = [pool.close]
     try:
+        jwt_verifier = build_jwt_verifier(settings)
         object_store = S3ObjectLockStore(
             boto3.client("s3", region_name=settings.aws_region),
             settings.audit_bucket,
@@ -104,5 +107,24 @@ async def build_services(settings: Settings) -> AppServices:
             require_aligned_dkim=settings.email_require_aligned_dkim,
             dns_timeout=settings.email_dns_timeout_seconds,
         ),
+        jwt_verifier=jwt_verifier,
         closers=closers,
+    )
+
+
+def build_jwt_verifier(settings: Settings) -> SupabaseJWTVerifier:
+    """Create the Supabase access-token verifier for broker endpoints.
+
+    Raises:
+        RuntimeError: If neither a JWKS URL nor the legacy secret is configured.
+    """
+    if not settings.supabase_jwt_issuer:
+        raise RuntimeError("TRIAGE_SUPABASE_JWT_ISSUER is not configured")
+    secret = settings.supabase_jwt_secret.get_secret_value() or None
+    if not settings.supabase_jwks_url and not secret:
+        raise RuntimeError("configure TRIAGE_SUPABASE_JWKS_URL (or the legacy JWT secret)")
+    return SupabaseJWTVerifier(
+        issuer=settings.supabase_jwt_issuer,
+        jwks_url=settings.supabase_jwks_url,
+        hs256_secret=None if settings.supabase_jwks_url else secret,
     )

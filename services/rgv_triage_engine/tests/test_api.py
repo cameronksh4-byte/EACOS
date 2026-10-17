@@ -149,7 +149,12 @@ def test_whatsapp_valid_message_is_triaged(
     assert packet.bill_of_lading.driver_license_number is not None
     assert "BCN0012345" not in packet.model_dump_json()
 
-    records = [json.loads(object_store.objects[k]) for k in sorted(object_store.objects)]
+    records = [
+        json.loads(object_store.objects[k])
+        for k in sorted(object_store.objects)
+        if k.startswith("audit/")
+    ]
+    assert any(k.startswith("records/v1/") and "/triage-packet/" in k for k in object_store.objects)
     verify_chain(records)
     events = [r["event_type"] for r in records]
     assert "llm.extraction" in events and "triage.packet_created" in events

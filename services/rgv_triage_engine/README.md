@@ -1,6 +1,10 @@
 # RGV Cross-Border Logistics Triage Engine
 
-A security-first FastAPI backend that takes in Mexican SAT CFDI 4.0 facturas and bills of lading by WhatsApp and e-mail, pulls out their data with Claude on Amazon Bedrock, normalises weights to pounds, reconciles the two documents, and routes each northbound load to **CLEAR**, **REVIEW** or **HOLD**. Every step is written to a tamper-evident audit trail.
+A security-first FastAPI backend that takes in Mexican SAT CFDI 4.0 facturas and bills of lading by WhatsApp and e-mail, pulls out their data with Claude on Amazon Bedrock, normalises weights to pounds and reconciles the two documents. Each northbound load gets an advisory **CLEAR**, **REVIEW** or **HOLD** result. Every step is written to a tamper-evident audit trail.
+
+**Positioning:** this is a *pre-bridge triage and proofreading utility*. It never decides entry, classification or filing. Every packet waits for a licensed broker's recorded sign-off. The engine's result is advisory only.
+
+Decisions, their rationale and open compliance items are tracked in [`TRANSPARENCY_LOG.md`](TRANSPARENCY_LOG.md).
 
 ```
 WhatsApp ──HMAC──┐                                 ┌─ CFDI XML ─► defusedxml parser (no LLM)
@@ -24,6 +28,9 @@ E-mail relay ────┘   (ASGI)        sig/SPF   tokens└─ PDF/image �
 | `GET` | `/v1/webhooks/whatsapp` | Meta subscription handshake. The verify token is compared in constant time. |
 | `POST` | `/v1/webhooks/whatsapp` | WhatsApp Cloud API notifications. Signed with `X-Hub-Signature-256`. |
 | `POST` | `/v1/webhooks/email` | Raw RFC 5322 message from your MTA relay. Signed by the relay, then checked with SPF and DKIM. |
+| `GET` | `/v1/packets` | The broker's review queue (pending by default). Needs a Supabase Auth bearer token. |
+| `GET` | `/v1/packets/{id}` | A packet with its findings, review status and SHA-256. |
+| `POST` | `/v1/packets/{id}/reviews` | The broker's decision: `APPROVE`, `REQUEST_CORRECTION` or `REJECT`. |
 
 `/docs`, `/redoc` **and** `/openapi.json` are all disabled, so the schema is not published either.
 
@@ -79,13 +86,28 @@ E-mail relay ────┘   (ASGI)        sig/SPF   tokens└─ PDF/image �
   * Why it is a pipeline stage and not a body-rewriting ASGI middleware: the HMAC and DKIM checks must see the original bytes.
   * Extra safety: logs pass through a redaction filter, and the triage packet refuses to build if any raw personal ID is left.
 
+### Broker sign-off (human in the loop)
+* **Sign-in:** a Supabase Auth access token, checked on every request against JWKS (ES256/RS256) or a legacy HS256 secret. The algorithm list is fixed so tokens can't be downgraded. Issuer, audience, expiry and `role` are all checked. The token's `sub` is the tenant, so RLS applies.
+* **Approval rules:**
+  * Each WARNING and CRITICAL finding must be acknowledged by code.
+  * Approving a HOLD needs a written override of at least 20 characters.
+  * Approvals need an MFA session (`aal2`, on by default).
+  * Notes and override text are PII-tokenised.
+* **Records:** each decision is archived under Object Lock, together with the SHA-256 of the exact packet the broker saw, and is chained into the audit log before the status changes.
+* **Database guards** (`migrations/002_broker_review.sql`):
+  * Approvals and rejections are final.
+  * A status change without a matching review record is refused when the transaction commits.
+  * Packet columns other than the review status can't be updated.
+  * The reviewer must be the signed-in user.
+
 ### 5. Audit trail (`storage/audit.py`)
 * Each tenant has its own chain. Each record holds `prev_hash` and a `record_hash` (SHA-256 over canonical JSON). `verify_chain` detects edits, deletions and reordering.
 * Each record is its own S3 object, written with:
-  * `ObjectLockMode=COMPLIANCE`, retained for at least 1,827 days (19 CFR 163.4, five years). The config refuses anything shorter.
+  * `ObjectLockMode=COMPLIANCE`. The default retention is 1,917 days. 19 CFR 163.4's five years run from the entry date, which comes after triage, so the default adds 90 days. The config refuses anything under 1,827 days.
   * `IfNoneMatch: *`, so a record can never be overwritten.
   * An S3-verified `ChecksumSHA256`.
   * SSE-KMS encryption.
+* Every triage packet and every broker review is also archived in full under `records/v1/`. Its SHA-256 sits in a chained event, so the archive is covered by the chain.
 * The chain head lives in Postgres under `SELECT … FOR UPDATE`, which serialises writers across replicas. If a record reached S3 but the database commit failed, the next writer adopts it after checking it.
 * A database mirror (`audit_events`) is append-only, enforced by triggers, and the head can only move forward.
 * For the NIST AI RMF (*Measure*/*Manage*), every model call records the model ID, prompt version, SHA-256 of the input and output, token counts, latency and the schema-validation result. It never records content.
@@ -108,7 +130,8 @@ uvicorn --factory triage_engine.main:create_app --port 8080
 
 1. **Supabase:**
    * Create the backend role: `CREATE ROLE triage_backend LOGIN PASSWORD '…' NOINHERIT; GRANT authenticated TO triage_backend;`
-   * Apply `migrations/001_init.sql`.
+   * Apply `migrations/001_init.sql` and then `migrations/002_broker_review.sql`.
+   * Require MFA (TOTP) for broker users. Set `TRIAGE_SUPABASE_JWT_ISSUER` and `TRIAGE_SUPABASE_JWKS_URL`.
    * Add rows to `private.channel_routes`, mapping each WhatsApp `phone_number_id` or inbound mailbox (lower case) to a tenant's `auth.users.id`.
    * Connect with TLS verification using Supabase's CA certificate (`TRIAGE_DATABASE_SSL_ROOT_CERT`). If you use the transaction pooler, set `TRIAGE_DATABASE_USES_TRANSACTION_POOLER=true`.
 2. **Audit bucket:** Object Lock can only be turned on when the bucket is created.
@@ -128,7 +151,7 @@ uvicorn --factory triage_engine.main:create_app --port 8080
 5. **E-mail relay** (SES receipt rule → Lambda, or Postfix):
    * POST the raw message with these headers: `X-Relay-Timestamp`, `X-Envelope-Client-IP`, `X-Envelope-Mail-From`, `X-Envelope-Helo` and `X-Envelope-Rcpt-To`.
    * Also send `X-Relay-Signature-256: sha256=HMAC(secret, "ts\nip\nmail_from\nhelo\nrcpt_to\n" + body)`.
-6. Run the container (`Dockerfile`, non-root, no writes to disk) behind an ALB with TLS and AWS WAF.
+6. Run the container (`Dockerfile`, non-root, no writes to disk) on AWS App Runner or ECS Fargate in `us-east-1`, behind TLS and AWS WAF. Prefer these to Render: they give the service a short-lived IAM role, so no long-lived AWS keys are stored on a third-party platform. Startup refuses any non-US region.
 
 ## Design notes and limitations
 

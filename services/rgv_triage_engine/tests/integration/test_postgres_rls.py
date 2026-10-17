@@ -18,6 +18,7 @@ import asyncpg
 import pytest
 
 from conftest import make_bol, make_factura
+from triage_engine.schemas.review import BrokerReviewRecord, ReviewDecision, ReviewStatus
 from triage_engine.services.reconciliation import build_triage_packet
 from triage_engine.storage.audit import AuditEventType, AuditLogger, InMemoryObjectStore
 from triage_engine.storage.db import tenant_transaction
@@ -62,7 +63,8 @@ async def pool() -> AsyncIterator[asyncpg.Pool]:
             GRANT CONNECT ON DATABASE "{db_name}" TO triage_backend;
             """
         )
-        await db_admin.execute((ROOT / "migrations/001_init.sql").read_text())
+        for migration in sorted((ROOT / "migrations").glob("*.sql")):
+            await db_admin.execute(migration.read_text())
         await db_admin.execute("INSERT INTO auth.users (id) VALUES ($1), ($2)", TENANT_A, TENANT_B)
         await db_admin.execute(
             "INSERT INTO private.channel_routes (channel, external_id, tenant_id) VALUES "
@@ -162,3 +164,88 @@ async def test_audit_chain_head_and_append_only_mirror(pool: asyncpg.Pool) -> No
     async with tenant_transaction(pool, TENANT_A) as conn:
         with pytest.raises(asyncpg.CheckViolationError):
             await conn.execute("UPDATE public.audit_chain_heads SET last_sequence = 1")
+
+
+async def _saved_packet(pool: asyncpg.Pool, **factura_overrides: object):  # type: ignore[no-untyped-def]
+    repo = PostgresTriageRepository(pool)
+    inbound = await repo.record_inbound(TENANT_A, "email", f"<{uuid4()}@x>", "a" * 64, None)
+    assert inbound is not None
+    factura, bol = make_factura(**factura_overrides), make_bol()
+    f_id = await repo.save_document(TENANT_A, inbound, factura, "b" * 64)
+    b_id = await repo.save_document(TENANT_A, inbound, bol, "c" * 64)
+    packet = build_triage_packet(tenant_id=TENANT_A, factura=factura, bol=bol)
+    await repo.save_packet(TENANT_A, packet, f_id, b_id)
+    return repo, packet
+
+
+def _review(packet, decision: ReviewDecision, **extra: object) -> BrokerReviewRecord:  # type: ignore[no-untyped-def]
+    return BrokerReviewRecord(
+        packet_id=packet.packet_id,
+        tenant_id=TENANT_A,
+        reviewer_id=TENANT_A,
+        decision=decision,
+        resulting_status=decision.resulting_status,
+        engine_disposition=packet.disposition,
+        packet_sha256="d" * 64,
+        **extra,
+    )
+
+
+async def test_review_lifecycle_and_finality(pool: asyncpg.Pool) -> None:
+    repo, packet = await _saved_packet(pool)
+    queue = await repo.list_packets(TENANT_A, ReviewStatus.PENDING_BROKER_REVIEW, 10)
+    assert packet.packet_id in {row.packet_id for row in queue}
+    assert await repo.list_packets(TENANT_B, None, 10) == []
+
+    assert await repo.record_review(TENANT_A, _review(packet, ReviewDecision.APPROVE), "k1")
+    found = await repo.get_packet(TENANT_A, packet.packet_id)
+    assert found is not None and found[1] is ReviewStatus.APPROVED_BY_BROKER
+    assert found[0] == packet
+    # Final state: the repository refuses, and so does the database itself.
+    assert not await repo.record_review(TENANT_A, _review(packet, ReviewDecision.REJECT), "k2")
+    async with tenant_transaction(pool, TENANT_A) as conn:
+        with pytest.raises(asyncpg.CheckViolationError, match="final"):
+            await conn.execute(
+                "UPDATE public.triage_packets SET review_status = 'PENDING_BROKER_REVIEW' "
+                "WHERE id = $1",
+                packet.packet_id,
+            )
+    async with tenant_transaction(pool, TENANT_A) as conn:
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await conn.execute("DELETE FROM public.packet_reviews")
+
+
+async def test_status_change_without_review_row_fails_at_commit(pool: asyncpg.Pool) -> None:
+    _, packet = await _saved_packet(pool)
+    with pytest.raises(asyncpg.CheckViolationError, match="without a packet_reviews record"):
+        async with tenant_transaction(pool, TENANT_A) as conn:
+            await conn.execute(
+                "UPDATE public.triage_packets SET review_status = 'APPROVED_BY_BROKER' "
+                "WHERE id = $1",
+                packet.packet_id,
+            )
+
+
+async def test_other_packet_columns_are_immutable(pool: asyncpg.Pool) -> None:
+    _, packet = await _saved_packet(pool)
+    async with tenant_transaction(pool, TENANT_A) as conn:
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await conn.execute(
+                "UPDATE public.triage_packets SET disposition = 'CLEAR' WHERE id = $1",
+                packet.packet_id,
+            )
+
+
+async def test_db_requires_override_reason_for_hold_approval(pool: asyncpg.Pool) -> None:
+    repo, packet = await _saved_packet(pool, package_count=1)
+    with pytest.raises(asyncpg.CheckViolationError):
+        await repo.record_review(TENANT_A, _review(packet, ReviewDecision.APPROVE), "k")
+    ok = _review(packet, ReviewDecision.APPROVE, override_reason="x" * 25)
+    assert await repo.record_review(TENANT_A, ok, "k")
+
+
+async def test_reviewer_must_be_the_signed_in_user(pool: asyncpg.Pool) -> None:
+    repo, packet = await _saved_packet(pool)
+    forged = _review(packet, ReviewDecision.REJECT).model_copy(update={"reviewer_id": TENANT_B})
+    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+        await repo.record_review(TENANT_A, forged, "k")

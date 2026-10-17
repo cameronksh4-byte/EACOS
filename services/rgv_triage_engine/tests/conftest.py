@@ -23,6 +23,13 @@ from triage_engine.schemas.documents import (
     CrossBorderLoadTriagePacket,
     MexicanFacturaDocument,
 )
+from triage_engine.schemas.review import (
+    OPEN_REVIEW_STATUSES,
+    BrokerReviewRecord,
+    PacketSummary,
+    ReviewStatus,
+)
+from triage_engine.security.auth import SupabaseJWTVerifier
 from triage_engine.security.email_auth import (
     AuthResult,
     EmailAuthVerdict,
@@ -51,6 +58,8 @@ INBOX = "docs@tenant.example.com"
 APP_SECRET = "meta-app-secret-for-tests"
 RELAY_SECRET = "relay-secret-for-tests"
 PII_KEY = "k" * 48
+JWT_SECRET = "supabase-legacy-jwt-secret-for-tests-0123456789"
+JWT_ISSUER = "https://testproject.supabase.co/auth/v1"
 
 
 class FakeRepository:
@@ -65,6 +74,8 @@ class FakeRepository:
         self.status: dict[UUID, str] = {}
         self.documents: dict[UUID, tuple[UUID, LogisticsDocument, UUID | None]] = {}
         self.packets: list[CrossBorderLoadTriagePacket] = []
+        self.review_status: dict[UUID, ReviewStatus] = {}
+        self.reviews: list[tuple[BrokerReviewRecord, str]] = []
 
     async def resolve_tenant(self, channel: Channel, external_id: str) -> UUID | None:
         return self.routes.get((channel, external_id.lower()))
@@ -116,9 +127,45 @@ class FakeRepository:
         bol_id: UUID,
     ) -> None:
         self.packets.append(packet)
+        self.review_status[packet.packet_id] = ReviewStatus.PENDING_BROKER_REVIEW
         for doc_id in (factura_id, bol_id):
             owner, doc, _ = self.documents[doc_id]
             self.documents[doc_id] = (owner, doc, packet.packet_id)
+
+    async def list_packets(
+        self, tenant_id: UUID, review_status: ReviewStatus | None, limit: int
+    ) -> list[PacketSummary]:
+        rows = [
+            PacketSummary(
+                packet_id=p.packet_id,
+                load_reference=p.load_reference,
+                disposition=p.disposition,
+                review_status=self.review_status[p.packet_id],
+                weight_variance_pct=str(p.weight_variance_pct),
+                created_at=p.created_at,
+            )
+            for p in reversed(self.packets)
+            if p.tenant_id == tenant_id
+            and (review_status is None or self.review_status[p.packet_id] is review_status)
+        ]
+        return rows[:limit]
+
+    async def get_packet(
+        self, tenant_id: UUID, packet_id: UUID
+    ) -> tuple[CrossBorderLoadTriagePacket, ReviewStatus] | None:
+        for packet in self.packets:
+            if packet.packet_id == packet_id and packet.tenant_id == tenant_id:
+                return packet, self.review_status[packet_id]
+        return None
+
+    async def record_review(
+        self, tenant_id: UUID, review: BrokerReviewRecord, archive_key: str
+    ) -> bool:
+        if self.review_status.get(review.packet_id) not in OPEN_REVIEW_STATUSES:
+            return False
+        self.review_status[review.packet_id] = review.resulting_status
+        self.reviews.append((review, archive_key))
+        return True
 
 
 class FakeExtractor:
@@ -249,6 +296,7 @@ def services(
         sanitizer=sanitizer,
         pipeline=pipeline,
         email_authenticator=email_authenticator,  # type: ignore[arg-type]
+        jwt_verifier=SupabaseJWTVerifier(issuer=JWT_ISSUER, hs256_secret=JWT_SECRET),
     )
 
 
