@@ -1,10 +1,6 @@
-.git
-.env
+# Only requirements.txt and app/ are copied into the image.
+*
+!requirements.txt
+!app/
 **/__pycache__
 **/*.pyc
-.pytest_cache
-tests
-terraform
-ingest
-supabase
-*.md

@@ -134,7 +134,7 @@ async def health_check():
 @app.post(
     "/v1/triage",
     response_model=AgentTriageResult,
-    dependencies=[Depends(require_webhook_secret), Depends(require_feature(Feature.TRIAGE_AND_DRAFT))],
+    dependencies=[Depends(require_feature(Feature.TRIAGE_AND_DRAFT)), Depends(require_webhook_secret)],
 )
 async def triage_ticket(payload: IncomingTicketWebhook):
     require_tenant(payload.tenant_id)
@@ -144,7 +144,7 @@ async def triage_ticket(payload: IncomingTicketWebhook):
 @app.get(
     "/v1/telemetry/{tenant_id}/roi-summary",
     response_model=ROISummary,
-    dependencies=[Depends(require_webhook_secret), Depends(require_feature(Feature.ROI_TELEMETRY))],
+    dependencies=[Depends(require_feature(Feature.ROI_TELEMETRY)), Depends(require_webhook_secret)],
 )
 async def roi_summary(tenant_id: str, days: int = Query(30, ge=1, le=365)):
     require_tenant(tenant_id)
@@ -185,7 +185,7 @@ async def approval_callback(body: bytes = Depends(require_n8n_signature)):
 @app.post(
     "/v1/webhooks/ticket-resolved",
     status_code=202,
-    dependencies=[Depends(require_webhook_secret), Depends(require_feature(Feature.KNOWLEDGE_FLYWHEEL))],
+    dependencies=[Depends(require_feature(Feature.KNOWLEDGE_FLYWHEEL)), Depends(require_webhook_secret)],
 )
 async def ticket_resolved(event: TicketResolvedWebhook):
     require_tenant(event.tenant_id)
@@ -210,7 +210,7 @@ async def sop_draft_callback(body: bytes = Depends(require_n8n_signature)):
 @app.post(
     "/v1/reports/weekly",
     response_model=WeeklyReport,
-    dependencies=[Depends(require_webhook_secret), Depends(require_feature(Feature.EXECUTIVE_REPORTS))],
+    dependencies=[Depends(require_feature(Feature.EXECUTIVE_REPORTS)), Depends(require_webhook_secret)],
 )
 async def weekly_report(tenant_id: str = Query(..., pattern=r"^[a-z0-9-]{2,64}$"), deliver: bool = True):
     require_tenant(tenant_id)

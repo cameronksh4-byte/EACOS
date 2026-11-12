@@ -1,6 +1,38 @@
-anthropic[bedrock]>=2.8,<3
-fastapi>=0.115
-uvicorn[standard]>=0.30
-pydantic>=2.9
-pydantic-settings>=2.6
-httpx>=0.27
+# Locked runtime dependencies for the production image (Python 3.12, linux/arm64).
+# Generated from requirements.in by `make lock` (scripts/lock_requirements.py). Do not edit by hand.
+
+annotated-doc==0.0.6  # transitive
+annotated-types==0.8.0  # transitive
+anthropic[bedrock]==2.8.0
+anyio==4.16.0  # transitive
+boto3==1.44.2  # transitive
+botocore==1.44.2  # transitive
+certifi==2026.10.23  # transitive
+click==8.5.1  # transitive
+docstring-parser==0.18.0  # transitive
+fastapi==0.162.5
+h11==0.16.0  # transitive
+httpcore==1.0.9  # transitive
+httpcore2==2.16.0  # transitive
+httptools==0.9.0
+httpx==0.28.1
+httpx2==2.16.0  # transitive
+idna==3.20  # transitive
+jiter==0.19.0  # transitive
+jmespath==1.1.0  # transitive
+opentelemetry-api==1.45.2  # transitive
+pydantic==2.14.3
+pydantic-core==2.50.4  # transitive
+pydantic-settings==2.16.2
+python-dateutil==2.9.0.post0  # transitive
+python-dotenv==1.2.4  # transitive
+s3transfer==0.19.3  # transitive
+six==1.17.0  # transitive
+sniffio==1.3.1  # transitive
+starlette==1.10.0  # transitive
+truststore==0.10.5  # transitive
+typing-extensions==4.16.0  # transitive
+typing-inspection==0.4.5  # transitive
+urllib3==2.8.0  # transitive
+uvicorn==0.54.0
+uvloop==0.23.0

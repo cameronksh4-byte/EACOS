@@ -4,7 +4,8 @@ Routes:
     @app.get("/v1/thing", dependencies=[Depends(require_feature(Feature.X))])
 A route whose feature is above the deployment's tier, or kill-switched, returns
 404. Locked features look as if they don't exist, rather than advertising an
-upsell surface to callers.
+upsell surface to callers. List the feature gate *before* any auth dependency,
+so a locked route answers 404 rather than 401 (FastAPI runs them in order).
 
 Services:
     @gated(Feature.CONTEXT_ENRICHMENT, default=None)

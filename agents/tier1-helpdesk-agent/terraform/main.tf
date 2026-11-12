@@ -61,6 +61,99 @@ variable "monthly_token_budget_usd" {
   default = "25.00"
 }
 
+# --- Commercial tier ----------------------------------------------------------
+
+variable "service_tier" {
+  type        = string
+  default     = "TIER_0_INCENTIVE"
+  description = "TIER_0_INCENTIVE (free trial), TIER_1_PRODUCTION, or TIER_2_MANAGED_OPS"
+  validation {
+    condition     = contains(["TIER_0_INCENTIVE", "TIER_1_PRODUCTION", "TIER_2_MANAGED_OPS"], var.service_tier)
+    error_message = "service_tier must be TIER_0_INCENTIVE, TIER_1_PRODUCTION or TIER_2_MANAGED_OPS."
+  }
+}
+
+variable "trial_expires_on" {
+  type        = string
+  default     = ""
+  description = "Tier 0 only: YYYY-MM-DD after which tickets go to humans. Empty = no expiry."
+  validation {
+    condition     = var.trial_expires_on == "" || can(regex("^\\d{4}-\\d{2}-\\d{2}$", var.trial_expires_on))
+    error_message = "trial_expires_on must be YYYY-MM-DD or empty."
+  }
+}
+
+variable "disabled_features" {
+  type        = list(string)
+  default     = []
+  description = "Kill switch: features to turn off (can only remove, never add, features)."
+}
+
+variable "allowed_tenant_ids" {
+  type        = list(string)
+  default     = []
+  description = "Extra tenants this deployment serves besides client_slug."
+}
+
+variable "public_hostname" {
+  type        = string
+  description = "DNS name on the ACM certificate, e.g. helpdesk.acme.com (n8n calls back here)."
+}
+
+# --- Model provider -----------------------------------------------------------
+
+variable "llm_provider" {
+  type    = string
+  default = "anthropic"
+  validation {
+    condition     = contains(["anthropic", "bedrock"], var.llm_provider)
+    error_message = "llm_provider must be anthropic or bedrock."
+  }
+}
+
+variable "bedrock_model_arns" {
+  type        = list(string)
+  default     = ["*"]
+  description = "Resources for bedrock-mantle:CreateInference. Narrow to the model ARNs you enable."
+}
+
+# --- Sizing -------------------------------------------------------------------
+
+variable "task_cpu" {
+  type    = string
+  default = "512"
+}
+
+variable "task_memory" {
+  type    = string
+  default = "1024"
+}
+
+variable "max_count" {
+  type    = number
+  default = 4
+}
+
+variable "readonly_root_filesystem" {
+  type        = bool
+  default     = false
+  description = "Opt in once verified on Fargate (uvicorn workers may need /dev/shm)."
+}
+
+variable "extra_environment" {
+  type        = map(string)
+  default     = {}
+  description = <<-EOT
+    Non-secret settings by env var name, e.g. N8N_APPROVAL_WEBHOOK_URL, N8N_NOTIFY_WEBHOOK_URL,
+    SLACK_ESCALATION_CHANNEL, IDENTITY_PROVIDER, GRAPH_TENANT_ID, GRAPH_CLIENT_ID, OKTA_DOMAIN,
+    IT_MANAGER_EMAIL, HELPDESK_NAME, JIRA_BASE_URL, JIRA_EMAIL. Secrets go in integration_secrets.
+  EOT
+  validation {
+    condition     = alltrue([for k in keys(var.extra_environment) : !can(regex("(SECRET|TOKEN|PASSWORD|API_KEY|SERVICE_KEY)", k))])
+    error_message = "extra_environment looks like it contains a secret; put it in integration_secrets instead."
+  }
+}
+
 variable "allowed_ingress_cidrs" {
   type        = list(string)
   description = "Who may reach the ALB. Narrow to Slack/Jira/Cloudflare ranges if you can."
@@ -78,8 +171,10 @@ variable "supabase_service_key" {
   sensitive = true
 }
 variable "llm_api_key" {
-  type      = string
-  sensitive = true
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "Anthropic API key (required when llm_provider = anthropic)."
 }
 variable "voyage_api_key" {
   type      = string
@@ -95,10 +190,10 @@ variable "integration_secrets" {
   sensitive   = true
   default     = {}
   description = <<-EOT
-    Optional integration settings by env var name, e.g.
-    SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_ESCALATION_CHANNEL,
-    TEAMS_OUTGOING_WEBHOOK_SECRET, TEAMS_INCOMING_WEBHOOK_URL,
-    JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_WEBHOOK_SECRET.
+    Secret integration settings by env var name, e.g.
+    SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, TEAMS_OUTGOING_WEBHOOK_SECRET, TEAMS_INCOMING_WEBHOOK_URL,
+    JIRA_API_TOKEN, JIRA_WEBHOOK_SECRET, N8N_OUTBOUND_SIGNING_SECRET, N8N_CALLBACK_SECRET,
+    GRAPH_CLIENT_SECRET, OKTA_API_TOKEN.
   EOT
 }
 
@@ -107,16 +202,50 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  name = "${var.client_slug}-tier1-agent"
-  core_secrets = {
-    SUPABASE_URL         = var.supabase_url
-    SUPABASE_SERVICE_KEY = var.supabase_service_key
-    LLM_API_KEY          = var.llm_api_key
-    VOYAGE_API_KEY       = var.voyage_api_key
-    WEBHOOK_SECRET       = var.webhook_secret
-  }
+  name      = "${var.client_slug}-tier1-agent"
+  tier_rank = { TIER_0_INCENTIVE = 0, TIER_1_PRODUCTION = 1, TIER_2_MANAGED_OPS = 2 }[var.service_tier]
+  anthropic = var.llm_provider == "anthropic"
+
+  core_secrets = merge(
+    {
+      SUPABASE_URL         = var.supabase_url
+      SUPABASE_SERVICE_KEY = var.supabase_service_key
+      VOYAGE_API_KEY       = var.voyage_api_key
+      WEBHOOK_SECRET       = var.webhook_secret
+    },
+    local.anthropic ? { LLM_API_KEY = var.llm_api_key } : {},
+  )
   # Key names aren't secret; only the values are.
-  secret_keys = concat(keys(local.core_secrets), nonsensitive(keys(var.integration_secrets)))
+  core_secret_names        = concat(["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "VOYAGE_API_KEY", "WEBHOOK_SECRET"], local.anthropic ? ["LLM_API_KEY"] : [])
+  integration_secret_names = nonsensitive(keys(var.integration_secrets))
+  secret_keys              = concat(local.core_secret_names, local.integration_secret_names)
+
+  base_environment = merge(
+    {
+      TENANT_ID                = var.client_slug
+      SERVICE_TIER             = var.service_tier
+      MONTHLY_TOKEN_BUDGET_USD = var.monthly_token_budget_usd
+      LLM_PROVIDER             = var.llm_provider
+      AWS_REGION               = var.aws_region
+      PUBLIC_BASE_URL          = "https://${var.public_hostname}"
+      ALLOWED_TENANT_IDS       = join(",", distinct(concat([var.client_slug], var.allowed_tenant_ids)))
+      DISABLED_FEATURES        = join(",", var.disabled_features)
+    },
+    var.trial_expires_on != "" ? { TRIAL_EXPIRES_ON = var.trial_expires_on } : {},
+  )
+  environment = merge(var.extra_environment, local.base_environment) # base wins on conflicts
+
+  # What each tier needs at startup (mirrors Settings.missing_core_settings), checked at plan time.
+  outage_on      = !contains(var.disabled_features, "outage_detection")
+  approvals_on   = local.tier_rank >= 1 && !contains(var.disabled_features, "manager_approvals")
+  flywheel_on    = local.tier_rank >= 2 && !contains(var.disabled_features, "knowledge_flywheel")
+  reports_on     = local.tier_rank >= 2 && !contains(var.disabled_features, "executive_reports")
+  has_env        = { for k in ["N8N_APPROVAL_WEBHOOK_URL", "N8N_NOTIFY_WEBHOOK_URL", "SLACK_ESCALATION_CHANNEL"] : k => contains(keys(var.extra_environment), k) }
+  has_secret     = { for k in ["N8N_OUTBOUND_SIGNING_SECRET", "N8N_CALLBACK_SECRET", "SLACK_BOT_TOKEN"] : k => contains(local.integration_secret_names, k) }
+  tier2_channel  = (local.has_env["N8N_NOTIFY_WEBHOOK_URL"] && local.has_secret["N8N_OUTBOUND_SIGNING_SECRET"]) || (local.has_env["SLACK_ESCALATION_CHANNEL"] && local.has_secret["SLACK_BOT_TOKEN"])
+  approvals_ok   = local.has_env["N8N_APPROVAL_WEBHOOK_URL"] && local.has_secret["N8N_OUTBOUND_SIGNING_SECRET"] && local.has_secret["N8N_CALLBACK_SECRET"]
+  tier2_ready    = local.has_env["N8N_NOTIFY_WEBHOOK_URL"] && local.has_secret["N8N_OUTBOUND_SIGNING_SECRET"]
+  flywheel_ready = local.has_secret["N8N_CALLBACK_SECRET"]
 }
 
 # ---------------------------------------------------------------------------
@@ -361,10 +490,24 @@ resource "aws_iam_role_policy" "read_runtime_secret" {
   })
 }
 
-# The app calls no AWS APIs, so the task role has no permissions.
+# The task role grants only what the app calls: Claude via Bedrock, when selected.
 resource "aws_iam_role" "ecs_task_role" {
   name               = "${local.name}-task-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+}
+
+resource "aws_iam_role_policy" "bedrock_inference" {
+  count = local.anthropic ? 0 : 1
+  name  = "bedrock-mantle-inference"
+  role  = aws_iam_role.ecs_task_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["bedrock-mantle:CreateInference"]
+      Resource = var.bedrock_model_arns
+    }]
+  })
 }
 
 # ---------------------------------------------------------------------------
@@ -379,8 +522,8 @@ resource "aws_ecs_task_definition" "agent_task" {
   family                   = "${local.name}-task"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "512"  # 0.5 vCPU
-  memory                   = "1024" # 1 GB RAM
+  cpu                      = var.task_cpu    # 512 = 0.5 vCPU
+  memory                   = var.task_memory # MiB
   execution_role_arn       = aws_iam_role.ecs_execution_role.arn
   task_role_arn            = aws_iam_role.ecs_task_role.arn
 
@@ -390,14 +533,20 @@ resource "aws_ecs_task_definition" "agent_task" {
   }
 
   container_definitions = jsonencode([{
-    name         = "tier1-agent"
-    image        = "${aws_ecr_repository.agent_repo.repository_url}:${var.image_tag}"
-    essential    = true
-    portMappings = [{ containerPort = 8000, hostPort = 8000, protocol = "tcp" }]
-    environment = [
-      { name = "TENANT_ID", value = var.client_slug },
-      { name = "MONTHLY_TOKEN_BUDGET_USD", value = var.monthly_token_budget_usd },
-    ]
+    name                   = "tier1-agent"
+    image                  = "${aws_ecr_repository.agent_repo.repository_url}:${var.image_tag}"
+    essential              = true
+    portMappings           = [{ containerPort = 8000, hostPort = 8000, protocol = "tcp" }]
+    readonlyRootFilesystem = var.readonly_root_filesystem
+    stopTimeout            = 30 # > uvicorn --timeout-graceful-shutdown 25
+    healthCheck = {
+      command     = ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 20
+    }
+    environment = [for k, v in local.environment : { name = k, value = v }]
     secrets = [
       for k in local.secret_keys : {
         name      = k
@@ -413,6 +562,30 @@ resource "aws_ecs_task_definition" "agent_task" {
       }
     }
   }])
+
+  # Fail at plan time rather than crash-looping on deploy (mirrors the app's startup check).
+  lifecycle {
+    precondition {
+      condition     = !local.anthropic || nonsensitive(var.llm_api_key != "")
+      error_message = "llm_provider = anthropic requires llm_api_key."
+    }
+    precondition {
+      condition     = !local.outage_on || local.tier2_channel
+      error_message = "Outage detection needs a Tier 2 channel: N8N_NOTIFY_WEBHOOK_URL (extra_environment) + N8N_OUTBOUND_SIGNING_SECRET, or SLACK_ESCALATION_CHANNEL + SLACK_BOT_TOKEN (integration_secrets)."
+    }
+    precondition {
+      condition     = !local.approvals_on || local.approvals_ok
+      error_message = "Tier 1 approvals need N8N_APPROVAL_WEBHOOK_URL (extra_environment) and N8N_OUTBOUND_SIGNING_SECRET + N8N_CALLBACK_SECRET (integration_secrets)."
+    }
+    precondition {
+      condition     = !(local.flywheel_on || local.reports_on) || local.tier2_ready
+      error_message = "Tier 2 needs N8N_NOTIFY_WEBHOOK_URL (extra_environment) and N8N_OUTBOUND_SIGNING_SECRET (integration_secrets)."
+    }
+    precondition {
+      condition     = !local.flywheel_on || local.flywheel_ready
+      error_message = "The Tier 2 knowledge flywheel needs N8N_CALLBACK_SECRET (integration_secrets) for SOP-draft approvals."
+    }
+  }
 }
 
 resource "aws_ecs_service" "agent_service" {
@@ -441,6 +614,39 @@ resource "aws_ecs_service" "agent_service" {
   }
 
   depends_on = [aws_lb_listener.https, aws_secretsmanager_secret_version.agent]
+
+  lifecycle {
+    ignore_changes = [desired_count] # owned by autoscaling
+  }
+}
+
+# ---------------------------------------------------------------------------
+# 9. Autoscaling on CPU (tickets are I/O-bound; CPU tracks concurrency well enough)
+# ---------------------------------------------------------------------------
+
+resource "aws_appautoscaling_target" "agent" {
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.cluster.name}/${aws_ecs_service.agent_service.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  min_capacity       = var.desired_count
+  max_capacity       = var.max_count
+}
+
+resource "aws_appautoscaling_policy" "cpu" {
+  name               = "${local.name}-cpu"
+  service_namespace  = aws_appautoscaling_target.agent.service_namespace
+  resource_id        = aws_appautoscaling_target.agent.resource_id
+  scalable_dimension = aws_appautoscaling_target.agent.scalable_dimension
+  policy_type        = "TargetTrackingScaling"
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 60
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 60
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -456,6 +662,19 @@ output "alb_dns_name" {
   value       = aws_lb.agent.dns_name
 }
 
+output "public_base_url" {
+  value = "https://${var.public_hostname}"
+}
+
+output "service_tier" {
+  value = var.service_tier
+}
+
 output "webhook_paths" {
-  value = ["/v1/triage", "/webhooks/slack", "/webhooks/teams", "/webhooks/jira"]
+  description = "Routes available at this tier (others return 404)"
+  value = concat(
+    ["/v1/triage", "/v1/telemetry/{tenant_id}/roi-summary", "/webhooks/slack", "/webhooks/teams", "/webhooks/jira"],
+    local.tier_rank >= 1 ? ["/v1/callbacks/approval"] : [],
+    local.tier_rank >= 2 ? ["/v1/webhooks/ticket-resolved", "/v1/callbacks/sop-draft", "/v1/reports/weekly"] : [],
+  )
 }

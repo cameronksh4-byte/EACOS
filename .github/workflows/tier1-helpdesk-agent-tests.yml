@@ -6,19 +6,26 @@ on:
   pull_request:
     paths: ["agents/tier1-helpdesk-agent/**", ".github/workflows/tier1-helpdesk-agent-tests.yml"]
 
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: agents/tier1-helpdesk-agent
+
 jobs:
-  test:
+  python:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: agents/tier1-helpdesk-agent
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
+      - run: make lint
       - run: python -m pytest -q
+      - name: Lock file pins every direct dependency within requirements.in
+        run: python scripts/lock_requirements.py --check
 
   schema:
     runs-on: ubuntu-latest
@@ -35,9 +42,6 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       PGDATABASE: postgres
-    defaults:
-      run:
-        working-directory: agents/tier1-helpdesk-agent
     steps:
       - uses: actions/checkout@v4
       - name: Apply migration (twice, to prove it is idempotent) and run SQL checks
@@ -47,3 +51,44 @@ jobs:
           psql -v ON_ERROR_STOP=1 -q -f supabase/migrations/001_init_schema.sql
           psql -v ON_ERROR_STOP=1 -f supabase/tests/001_init_schema_test.sql | tee out.txt
           grep -q "ALL SCHEMA CHECKS PASSED" out.txt
+
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agents/tier1-helpdesk-agent/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.17.2"
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+      - run: terraform test   # plan-only, mocked AWS provider
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build linux/arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: agents/tier1-helpdesk-agent
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: tier1-agent:ci
+      - name: Smoke test (arm64 under QEMU)
+        run: |
+          docker run --rm --platform linux/arm64 tier1-agent:ci id -u | grep -qx 10001
+          docker run -d --name agent --platform linux/arm64 -p 8000:8000 \
+            -e TENANT_ID=acme-corp -e WEBHOOK_SECRET=s -e LLM_API_KEY=k \
+            -e SUPABASE_URL=https://x.supabase.co -e SUPABASE_SERVICE_KEY=k -e VOYAGE_API_KEY=v \
+            -e SLACK_BOT_TOKEN=x -e SLACK_ESCALATION_CHANNEL=C1 tier1-agent:ci
+          for i in $(seq 1 30); do curl -fsS localhost:8000/health && break; sleep 2; done
+          curl -fsS localhost:8000/health | grep -q TIER_0_INCENTIVE
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8000/v1/callbacks/approval)" = 404
+          docker logs agent
