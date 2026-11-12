@@ -5,6 +5,7 @@ from app.schemas.ticket import (
     ScopeVerdict,
     SeverityLevel,
     TicketCategory,
+    TriageAction,
 )
 from app.services.guardrails import enforce_policy
 
@@ -20,12 +21,16 @@ TICKET = IncomingTicketWebhook(
 def draft(**overrides) -> LLMTriageOutput:
     base = dict(
         scope=ScopeVerdict.IN_SCOPE,
+        action=TriageAction.RESOLVE,
         category=TicketCategory.PASSWORD_AUTH,
         severity=SeverityLevel.MEDIUM,
         confidence_score=0.93,
         requires_tier2_escalation=False,
         cited_sop_ids=["SOP-AUTH-001"],
         draft_user_reply="1. Go to the reset portal...",
+        clarifying_question="",
+        requested_item="",
+        missing_sop_topic="",
         internal_tech_notes="",
     )
     base.update(overrides)

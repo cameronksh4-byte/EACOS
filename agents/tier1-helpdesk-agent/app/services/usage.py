@@ -23,11 +23,7 @@ _spend_cache: dict[str, tuple[float, float]] = {}  # tenant -> (fetched_at, usd)
 
 def estimate_cost_usd(model: str, usage: Any) -> float:
     """Cost of one response from its `usage` block (thinking is billed as output)."""
-    prices = get_settings().model_prices_per_mtok.get(model)
-    if prices is None:
-        # Unknown model (e.g. a fallback): price it like the costliest one we know.
-        prices = max(get_settings().model_prices_per_mtok.values())
-    in_price, out_price = prices
+    in_price, out_price = get_settings().price_for(model)
     uncached = getattr(usage, "input_tokens", 0) or 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
@@ -81,4 +77,4 @@ async def budget_exhausted(tenant_id: str) -> bool:
         # Can't verify: keep serving. RAG will fail too if Supabase is down,
         # which already routes tickets to a human.
         return False
-    return spend >= get_settings().monthly_token_budget_usd
+    return spend >= get_settings().budget_for(tenant_id)

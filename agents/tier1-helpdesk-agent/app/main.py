@@ -44,7 +44,7 @@ def _require_secret(provided: str) -> None:
 
 
 def _require_tenant(tenant_id: str) -> None:
-    if tenant_id != get_settings().tenant_id:
+    if not get_settings().is_tenant_allowed(tenant_id):
         raise HTTPException(status_code=403, detail="tenant not served by this deployment")
 
 

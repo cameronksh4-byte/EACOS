@@ -1,6 +1,9 @@
 ---
-sop_id: SOP-NET-001
+doc_id: SOP-NET-001
 title: GlobalProtect VPN will not connect
+system_name: GlobalProtect
+os_platform: any
+last_verified_date: 2026-11-01
 ---
 # GlobalProtect VPN will not connect
 

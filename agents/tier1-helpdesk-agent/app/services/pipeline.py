@@ -44,7 +44,7 @@ async def process_ticket(payload: IncomingTicketWebhook) -> AgentTriageResult:
     result = guardrails.enforce_policy(
         payload,
         decision.output,
-        retrieved_sop_ids={s.sop_id for s in sops},
+        retrieved_sop_ids={s.doc_id for s in sops},
         settings=settings,
         model_used=decision.model,
     )

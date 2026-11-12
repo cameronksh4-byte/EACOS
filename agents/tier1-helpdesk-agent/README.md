@@ -66,7 +66,7 @@ pip install -r requirements-dev.txt
 python -m pytest -q                       # 31 offline tests, no API calls
 
 cp .env.example .env                      # fill in keys
-# Apply supabase/migrations/001_tier1_agent.sql to your Supabase project, then:
+# Apply supabase/migrations/001_init_schema.sql to your Supabase project, then:
 python -m ingest.sync_docs --tenant acme-corp --docs ingest/sample_sops
 uvicorn app.main:app --reload
 

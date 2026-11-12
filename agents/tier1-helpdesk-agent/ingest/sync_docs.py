@@ -2,9 +2,10 @@
 
     python -m ingest.sync_docs --tenant acme-corp --docs ./sops [--prune] [--dry-run]
 
-* Reads .md and .txt files. Each file is one SOP. Its sop_id comes from a
-  `sop_id: ...` line in front matter, or else from the file name
-  (`vpn-connect.md` -> `VPN-CONNECT`). That is the ID the agent cites.
+* Reads .md and .txt files. Each file is one SOP. YAML-style front matter may set
+  `doc_id`, `title`, `system_name`, `os_platform` (any|windows|macos|linux|ios|
+  android|chromeos) and `last_verified_date` (YYYY-MM-DD). Without `doc_id`, the
+  file name is used (`vpn-connect.md` -> `VPN-CONNECT`). That is the ID the agent cites.
 * Splits on headings and caps chunk size, with a little overlap.
 * Only re-embeds chunks whose content changed (by SHA-256).
 * `--prune` deletes chunks for SOPs (or chunks) that no longer exist locally.
@@ -19,11 +20,13 @@ import hashlib
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import httpx
 
 from app.config import get_settings
+from app.schemas.ticket import DOC_ID_PATTERN, SOPPlatform
 
 VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
 MAX_CHUNK_CHARS = 1800
@@ -35,40 +38,72 @@ _HEADING = re.compile(r"^(#{1,3})\s+(.*)$", re.MULTILINE)
 
 
 @dataclass
-class Chunk:
-    sop_id: str
+class DocMeta:
+    doc_id: str
     title: str
+    system_name: str | None = None
+    os_platform: str = SOPPlatform.ANY.value
+    last_verified_date: str | None = None
+
+
+@dataclass
+class Chunk:
+    meta: DocMeta
     index: int
     content: str
 
     @property
+    def doc_id(self) -> str:
+        return self.meta.doc_id
+
+    @property
     def content_hash(self) -> str:
-        return hashlib.sha256(f"{self.title}\n{self.content}".encode()).hexdigest()
+        m = self.meta
+        key = f"{m.title}\n{m.system_name}\n{m.os_platform}\n{m.last_verified_date}\n{self.content}"
+        return hashlib.sha256(key.encode()).hexdigest()
 
     def row_id(self, tenant: str) -> str:
-        return f"{tenant}:{self.sop_id}#{self.index}"
+        return f"{tenant}:{self.doc_id}#{self.index}"
 
 
-def parse_document(path: Path) -> tuple[str, str, str]:
-    """Return (sop_id, title, body) for one SOP file."""
+def parse_document(path: Path) -> tuple[DocMeta, str]:
+    """Return (metadata, body) for one SOP file."""
     text = path.read_text(encoding="utf-8")
-    sop_id = None
-    title = None
+    fields: dict[str, str] = {}
     match = _FRONT_MATTER.match(text)
     if match:
         for line in match.group(1).splitlines():
             key, _, value = line.partition(":")
-            if key.strip() == "sop_id" and value.strip():
-                sop_id = value.strip()
-            elif key.strip() == "title" and value.strip():
-                title = value.strip()
+            if value.strip():
+                fields[key.strip().lower()] = value.strip().strip("'\"")
         text = text[match.end():]
-    if not sop_id:
-        sop_id = re.sub(r"[^A-Za-z0-9]+", "-", path.stem).strip("-").upper()
+
+    doc_id = fields.get("doc_id") or fields.get("sop_id")
+    if not doc_id:
+        doc_id = re.sub(r"[^A-Za-z0-9]+", "-", path.stem).strip("-").upper()
+    if not re.match(DOC_ID_PATTERN, doc_id):
+        raise SystemExit(f"{path}: invalid doc_id {doc_id!r}")
+
+    title = fields.get("title")
     if not title:
         heading = _HEADING.search(text)
         title = heading.group(2).strip() if heading else path.stem.replace("-", " ").title()
-    return sop_id, title, text.strip()
+
+    os_platform = fields.get("os_platform", SOPPlatform.ANY.value).lower()
+    try:
+        SOPPlatform(os_platform)
+    except ValueError:
+        raise SystemExit(f"{path}: os_platform must be one of {[p.value for p in SOPPlatform]}") from None
+
+    verified = fields.get("last_verified_date")
+    if verified:
+        try:
+            date.fromisoformat(verified)
+        except ValueError:
+            raise SystemExit(f"{path}: last_verified_date must be YYYY-MM-DD") from None
+
+    meta = DocMeta(doc_id, title, fields.get("system_name"), os_platform, verified)
+    return meta, text.strip()
 
 
 def _split_long(section: str) -> list[str]:
@@ -90,24 +125,24 @@ def _split_long(section: str) -> list[str]:
     return [p for p in pieces if p]
 
 
-def chunk_document(sop_id: str, title: str, body: str) -> list[Chunk]:
+def chunk_document(meta: DocMeta, body: str) -> list[Chunk]:
     starts = [m.start() for m in _HEADING.finditer(body)] or [0]
     if starts[0] != 0:
         starts.insert(0, 0)
     sections = [body[a:b].strip() for a, b in zip(starts, starts[1:] + [len(body)], strict=True)]
     pieces = [p for s in sections if s for p in _split_long(s)]
-    return [Chunk(sop_id, title, i, p) for i, p in enumerate(pieces)]
+    return [Chunk(meta, i, p) for i, p in enumerate(pieces)]
 
 
 def load_chunks(docs_dir: Path) -> list[Chunk]:
     chunks: list[Chunk] = []
     seen: dict[str, Path] = {}
     for path in sorted(p for p in docs_dir.rglob("*") if p.suffix.lower() in {".md", ".txt"}):
-        sop_id, title, body = parse_document(path)
-        if sop_id in seen:
-            raise SystemExit(f"duplicate sop_id {sop_id!r} in {path} and {seen[sop_id]}")
-        seen[sop_id] = path
-        chunks.extend(chunk_document(sop_id, title, body))
+        meta, body = parse_document(path)
+        if meta.doc_id in seen:
+            raise SystemExit(f"duplicate doc_id {meta.doc_id!r} in {path} and {seen[meta.doc_id]}")
+        seen[meta.doc_id] = path
+        chunks.extend(chunk_document(meta, body))
     return chunks
 
 
@@ -143,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{args.docs} is not a directory")
 
     chunks = load_chunks(args.docs)
-    print(f"loaded {len(chunks)} chunks from {len({c.sop_id for c in chunks})} SOPs")
+    print(f"loaded {len(chunks)} chunks from {len({c.doc_id for c in chunks})} SOPs")
 
     settings = get_settings()
     key = settings.supabase_service_key.get_secret_value()
@@ -171,13 +206,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if changed:
-            vectors = embed(client, [f"{c.title}\n\n{c.content}" for c in changed])
+            vectors = embed(client, [f"{c.meta.title}\n\n{c.content}" for c in changed])
             rows = [
                 {
                     "id": c.row_id(args.tenant),
                     "tenant_id": args.tenant,
-                    "sop_id": c.sop_id,
-                    "title": c.title,
+                    "doc_id": c.doc_id,
+                    "title": c.meta.title,
+                    "system_name": c.meta.system_name,
+                    "os_platform": c.meta.os_platform,
+                    "last_verified_date": c.meta.last_verified_date,
+                    "source": "ingest",
                     "chunk_index": c.index,
                     "content": c.content,
                     "content_hash": c.content_hash,

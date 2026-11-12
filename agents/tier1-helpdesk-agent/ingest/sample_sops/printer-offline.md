@@ -1,6 +1,9 @@
 ---
-sop_id: SOP-HW-001
+doc_id: SOP-HW-001
 title: Office printer shows offline
+system_name: Windows printing
+os_platform: windows
+last_verified_date: 2026-11-01
 ---
 # Office printer shows offline
 

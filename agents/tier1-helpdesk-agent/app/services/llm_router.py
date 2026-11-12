@@ -30,6 +30,7 @@ from app.schemas.ticket import (
     ScopeVerdict,
     SeverityLevel,
     TicketCategory,
+    TriageAction,
 )
 from app.services.rag import SopChunk
 
@@ -73,7 +74,7 @@ When a ticket mixes in-scope and out-of-scope asks, triage the in-scope part, an
 reply that the other part needs to go elsewhere.
 
 ## Grounding
-- Use only the SOPs inside <retrieved_sops>. Each has an sop_id. Cite the exact sop_id of \
+- Use only the SOPs inside <retrieved_sops>. Each has a doc_id. Cite the exact doc_id of \
 every SOP your reply relies on.
 - If no retrieved SOP covers the fix, don't improvise steps from general knowledge. Set \
 cited_sop_ids to [] and requires_tier2_escalation to true, and say a technician will follow up.
@@ -149,7 +150,7 @@ def build_user_message(payload: IncomingTicketWebhook, sops: list[SopChunk], set
     """Render SOPs and the (escaped, length-capped) ticket for the model."""
     if sops:
         sop_blocks = "\n".join(
-            f'<sop sop_id="{html.escape(s.sop_id, quote=True)}" title="{html.escape(s.title, quote=True)}">\n'
+            f'<sop doc_id="{html.escape(s.doc_id, quote=True)}" title="{html.escape(s.title, quote=True)}">\n'
             f"{s.content[: settings.max_sop_chars_per_chunk]}\n</sop>"
             for s in sops
         )
@@ -242,12 +243,16 @@ def refusal_output() -> LLMTriageOutput:
     """A model refusal is handled exactly like a not-IT-support request."""
     return LLMTriageOutput(
         scope=ScopeVerdict.NOT_IT_SUPPORT,
+        action=TriageAction.RESOLVE,
         category=TicketCategory.UNKNOWN,
         severity=SeverityLevel.LOW,
         confidence_score=1.0,
         requires_tier2_escalation=False,
         cited_sop_ids=[],
         draft_user_reply="",
+        clarifying_question="",
+        requested_item="",
+        missing_sop_topic="",
         internal_tech_notes="Model declined the request; sent the standard out-of-scope reply.",
     )
 
@@ -267,9 +272,9 @@ async def route_ticket(payload: IncomingTicketWebhook, sops: list[SopChunk]) -> 
         return RouterDecision(output=first.output, model=first.model, attempts=attempts)
 
     second = await _call_model(
-        settings.escalation_model,
-        settings.escalation_effort,
-        settings.escalation_max_tokens,
+        settings.reasoning_model,
+        settings.reasoning_effort,
+        settings.reasoning_max_tokens,
         user_message,
         sonnet_route=True,
     )

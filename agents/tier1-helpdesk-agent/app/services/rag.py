@@ -23,8 +23,10 @@ _voyage: httpx.AsyncClient | None = None
 
 
 class SopChunk(BaseModel):
-    sop_id: str
+    doc_id: str
     title: str
+    system_name: str | None = None
+    os_platform: str = "any"
     content: str
     similarity: float
 
@@ -52,7 +54,9 @@ async def embed_query(text: str) -> list[float]:
     return resp.json()["data"][0]["embedding"]
 
 
-async def retrieve_relevant_sops(tenant_id: str, query: str, top_k: int | None = None) -> list[SopChunk]:
+async def retrieve_relevant_sops(
+    tenant_id: str, query: str, top_k: int | None = None, os_platform: str | None = None
+) -> list[SopChunk]:
     """Return the closest SOP chunks for this tenant, best first.
 
     Raises on network/database errors; the caller decides how to degrade.
@@ -66,6 +70,7 @@ async def retrieve_relevant_sops(tenant_id: str, query: str, top_k: int | None =
             "p_query_embedding": embedding,
             "p_match_count": top_k or settings.rag_top_k,
             "p_min_similarity": settings.rag_min_similarity,
+            "p_os_platform": os_platform,
         },
     )
     chunks = [SopChunk.model_validate(row) for row in rows]

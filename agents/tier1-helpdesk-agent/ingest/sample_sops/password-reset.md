@@ -1,6 +1,9 @@
 ---
-sop_id: SOP-AUTH-001
+doc_id: SOP-AUTH-001
 title: Self-service password reset and account unlock
+system_name: Entra ID
+os_platform: any
+last_verified_date: 2026-11-01
 ---
 # Self-service password reset and account unlock
 

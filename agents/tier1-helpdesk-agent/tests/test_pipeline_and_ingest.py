@@ -2,7 +2,7 @@ from pathlib import Path
 
 from app.schemas.ticket import IncomingTicketWebhook, LLMTriageOutput, ScopeVerdict
 from app.services import llm_router, pipeline, rag, usage
-from ingest.sync_docs import chunk_document, load_chunks, parse_document
+from ingest.sync_docs import DocMeta, chunk_document, load_chunks, parse_document
 
 TICKET = IncomingTicketWebhook(
     tenant_id="acme-corp", ticket_id="T-5", reporter_email="a@acme.com", subject="s", body="b"
@@ -62,17 +62,19 @@ def test_llm_output_schema_is_strict():
 
 
 def test_sample_sops_parse_with_front_matter_ids():
-    sop_id, title, body = parse_document(SAMPLES / "vpn-connect.md")
-    assert sop_id == "SOP-NET-001"
-    assert title == "GlobalProtect VPN will not connect"
-    assert "sop_id" not in body
-    ids = {c.sop_id for c in load_chunks(SAMPLES)}
+    meta, body = parse_document(SAMPLES / "printer-offline.md")
+    assert meta.doc_id == "SOP-HW-001"
+    assert meta.title == "Office printer shows offline"
+    assert meta.os_platform == "windows" and meta.system_name == "Windows printing"
+    assert meta.last_verified_date == "2026-11-01"
+    assert "doc_id" not in body
+    ids = {c.doc_id for c in load_chunks(SAMPLES)}
     assert ids == {"SOP-AUTH-001", "SOP-NET-001", "SOP-HW-001"}
 
 
 def test_long_sections_are_split_with_overlap():
     body = "# Big\n" + ("word " * 1000)
-    chunks = chunk_document("SOP-X", "Big", body)
+    chunks = chunk_document(DocMeta("SOP-X", "Big"), body)
     assert len(chunks) > 1
     assert all(len(c.content) <= 1800 for c in chunks)
     assert [c.index for c in chunks] == list(range(len(chunks)))
