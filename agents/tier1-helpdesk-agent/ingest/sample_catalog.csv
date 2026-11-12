@@ -1,0 +1,6 @@
+item_key,item_type,display_name,aliases,requires_manager_approval,approver_role,app_owner_email,provisioning_group,license_cost_usd,doc_id,active
+zoom,software,Zoom,zoom meetings;zoom client,false,direct_manager,,sg-zoom-users,0,SOP-APP-ZOOM,true
+figma,software,Figma,figma design,true,direct_manager,,sg-figma-users,15,SOP-APP-FIGMA,true
+adobe-acrobat-pro,software,Adobe Acrobat Pro,acrobat pro;adobe pro,true,app_owner,licensing@acme.com,sg-acrobat-pro,23.99,,true
+salesforce,software,Salesforce,sfdc,true,app_owner,crm-admin@acme.com,sg-salesforce-users,,,true
+monitor-27,hardware,27-inch monitor,second monitor;external monitor,true,direct_manager,,,250,,true

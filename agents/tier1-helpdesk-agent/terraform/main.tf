@@ -7,7 +7,7 @@
 # they require, and which a bare task IP can't give (it changes on every deploy).
 
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.10" # S3 backend native locking (use_lockfile)
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -43,12 +43,40 @@ variable "client_slug" {
 
 variable "acm_certificate_arn" {
   type        = string
-  description = "ACM certificate for the webhook hostname (e.g. helpdesk.acme.com)"
+  default     = ""
+  description = "Existing ACM certificate for public_hostname. Leave empty to have Terraform issue one (needs route53_zone_id)."
+}
+
+variable "route53_zone_id" {
+  type        = string
+  default     = ""
+  description = "Route 53 hosted zone for public_hostname. When set, Terraform validates the certificate and creates the DNS alias."
 }
 
 variable "image_tag" {
-  type    = string
-  default = "latest"
+  type        = string
+  description = "Immutable image tag to run (deploy.sh uses the git commit SHA)."
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]{1,128}$", var.image_tag)) && var.image_tag != "latest"
+    error_message = "image_tag must be an immutable tag such as a git SHA (not 'latest')."
+  }
+}
+
+variable "alarm_email" {
+  type        = string
+  default     = ""
+  description = "Email for CloudWatch alarms (confirm the SNS subscription email). Empty = no alarms."
+}
+
+variable "enable_waf" {
+  type        = bool
+  default     = false
+  description = "Attach AWS WAF (managed common rules + per-IP rate limit) to the ALB (~$6/month + requests)."
+}
+
+variable "waf_rate_limit_per_5min" {
+  type    = number
+  default = 10000
 }
 
 variable "desired_count" {
@@ -202,9 +230,11 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  name      = "${var.client_slug}-tier1-agent"
-  tier_rank = { TIER_0_INCENTIVE = 0, TIER_1_PRODUCTION = 1, TIER_2_MANAGED_OPS = 2 }[var.service_tier]
-  anthropic = var.llm_provider == "anthropic"
+  name            = "${var.client_slug}-tier1-agent"
+  create_cert     = var.acm_certificate_arn == ""
+  certificate_arn = local.create_cert ? aws_acm_certificate_validation.agent[0].certificate_arn : var.acm_certificate_arn
+  tier_rank       = { TIER_0_INCENTIVE = 0, TIER_1_PRODUCTION = 1, TIER_2_MANAGED_OPS = 2 }[var.service_tier]
+  anthropic       = var.llm_provider == "anthropic"
 
   core_secrets = merge(
     {
@@ -254,7 +284,7 @@ locals {
 
 resource "aws_ecr_repository" "agent_repo" {
   name                 = local.name
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "IMMUTABLE" # a tag always means the same image
   force_delete         = true
 
   image_scanning_configuration {
@@ -402,12 +432,59 @@ resource "aws_lb_target_group" "agent" {
   }
 }
 
+# ---------------------------------------------------------------------------
+# TLS certificate: bring your own, or let Terraform issue + validate it in Route 53
+# ---------------------------------------------------------------------------
+
+resource "aws_acm_certificate" "agent" {
+  count             = local.create_cert ? 1 : 0
+  domain_name       = var.public_hostname
+  validation_method = "DNS"
+  lifecycle {
+    create_before_destroy = true
+    precondition {
+      condition     = var.route53_zone_id != ""
+      error_message = "Set acm_certificate_arn, or route53_zone_id so Terraform can validate a new certificate."
+    }
+  }
+}
+
+# One domain -> exactly one validation record, so index it (no for_each on
+# values that may be unknown until the certificate exists).
+resource "aws_route53_record" "cert_validation" {
+  count           = local.create_cert ? 1 : 0
+  zone_id         = var.route53_zone_id
+  name            = tolist(aws_acm_certificate.agent[0].domain_validation_options)[0].resource_record_name
+  type            = tolist(aws_acm_certificate.agent[0].domain_validation_options)[0].resource_record_type
+  records         = [tolist(aws_acm_certificate.agent[0].domain_validation_options)[0].resource_record_value]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "agent" {
+  count                   = local.create_cert ? 1 : 0
+  certificate_arn         = aws_acm_certificate.agent[0].arn
+  validation_record_fqdns = [aws_route53_record.cert_validation[0].fqdn]
+}
+
+resource "aws_route53_record" "app" {
+  count   = var.route53_zone_id != "" ? 1 : 0
+  zone_id = var.route53_zone_id
+  name    = var.public_hostname
+  type    = "A"
+  alias {
+    name                   = aws_lb.agent.dns_name
+    zone_id                = aws_lb.agent.zone_id
+    evaluate_target_health = true
+  }
+}
+
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.agent.arn
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = var.acm_certificate_arn
+  certificate_arn   = local.certificate_arn
 
   default_action {
     type             = "forward"
@@ -652,6 +729,161 @@ resource "aws_appautoscaling_policy" "cpu" {
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 10. Alarms (optional): email when the service is unhealthy or a guarantee is at risk
+# ---------------------------------------------------------------------------
+
+resource "aws_sns_topic" "alarms" {
+  count = var.alarm_email != "" ? 1 : 0
+  name  = "${local.name}-alarms"
+}
+
+resource "aws_sns_topic_subscription" "alarm_email" {
+  count     = var.alarm_email != "" ? 1 : 0
+  topic_arn = aws_sns_topic.alarms[0].arn
+  protocol  = "email"
+  endpoint  = var.alarm_email
+}
+
+locals {
+  alarm_actions = var.alarm_email != "" ? [aws_sns_topic.alarms[0].arn] : []
+  # Log lines that mean a guarantee needs a human: a Tier 2 notice wasn't delivered
+  # (outage / escalation exemption controls), or a tenant hit its spend cap.
+  log_alarms = {
+    tier2-notification-undelivered = { pattern = "\"tier2 notification not delivered\"", threshold = 1 }
+    budget-cap-reached             = { pattern = "\"monthly budget cap reached\"", threshold = 1 }
+    budget-ledger-unreachable      = { pattern = "\"budget ledger unreachable\"", threshold = 3 }
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "target_5xx" {
+  count               = var.alarm_email != "" ? 1 : 0
+  alarm_name          = "${local.name}-target-5xx"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "HTTPCode_Target_5XX_Count"
+  dimensions          = { LoadBalancer = aws_lb.agent.arn_suffix, TargetGroup = aws_lb_target_group.agent.arn_suffix }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 5
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "no_healthy_tasks" {
+  count               = var.alarm_email != "" ? 1 : 0
+  alarm_name          = "${local.name}-no-healthy-tasks"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "HealthyHostCount"
+  dimensions          = { LoadBalancer = aws_lb.agent.arn_suffix, TargetGroup = aws_lb_target_group.agent.arn_suffix }
+  statistic           = "Minimum"
+  period              = 60
+  evaluation_periods  = 3
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+}
+
+resource "aws_cloudwatch_log_metric_filter" "guarantees" {
+  for_each       = var.alarm_email != "" ? local.log_alarms : {}
+  name           = "${local.name}-${each.key}"
+  log_group_name = aws_cloudwatch_log_group.agent_logs.name
+  pattern        = each.value.pattern
+  metric_transformation {
+    name      = each.key
+    namespace = "Tier1Agent/${var.client_slug}"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "guarantees" {
+  for_each            = var.alarm_email != "" ? local.log_alarms : {}
+  alarm_name          = "${local.name}-${each.key}"
+  namespace           = "Tier1Agent/${var.client_slug}"
+  metric_name         = each.key
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = each.value.threshold
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_actions
+  depends_on          = [aws_cloudwatch_log_metric_filter.guarantees]
+}
+
+# ---------------------------------------------------------------------------
+# 11. WAF (optional)
+# ---------------------------------------------------------------------------
+
+resource "aws_wafv2_web_acl" "agent" {
+  count = var.enable_waf ? 1 : 0
+  name  = "${local.name}-waf"
+  scope = "REGIONAL"
+  default_action {
+    allow {}
+  }
+
+  rule {
+    name     = "common"
+    priority = 1
+    override_action {
+      none {}
+    }
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name        = "AWSManagedRulesCommonRuleSet"
+        # Jira/Slack webhook bodies can exceed 8 KB; count instead of blocking.
+        rule_action_override {
+          name = "SizeRestrictions_BODY"
+          action_to_use {
+            count {}
+          }
+        }
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "common"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "rate-limit"
+    priority = 2
+    action {
+      block {}
+    }
+    statement {
+      rate_based_statement {
+        limit              = var.waf_rate_limit_per_5min
+        aggregate_key_type = "IP"
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "rate-limit"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${local.name}-waf"
+    sampled_requests_enabled   = true
+  }
+}
+
+resource "aws_wafv2_web_acl_association" "agent" {
+  count        = var.enable_waf ? 1 : 0
+  resource_arn = aws_lb.agent.arn
+  web_acl_arn  = aws_wafv2_web_acl.agent[0].arn
+}
 
 output "ecr_repository_url" {
   value = aws_ecr_repository.agent_repo.repository_url

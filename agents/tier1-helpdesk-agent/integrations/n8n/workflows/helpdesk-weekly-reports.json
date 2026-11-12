@@ -1,0 +1,84 @@
+{
+  "name": "Help desk: weekly executive reports",
+  "nodes": [
+    {
+      "id": "226a3c7c-5cd5-5c2f-90cb-f2c86d14cdb1",
+      "name": "Every Monday 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "9ff3bcfb-8dc1-5ded-8307-8285b41c2b95",
+      "name": "Run now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "e157540d-1ea1-5724-b746-09f682fef8e5",
+      "name": "Request reports",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shared helpers, prepended to every Code node by build_workflows.py.\n// Runs inside n8n's Code node: `$env` and `this.helpers` are provided by n8n.\n// Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto and N8N_BLOCK_ENV_ACCESS_IN_NODE=false.\nconst crypto = require('crypto');\n\nfunction env(name, fallback) {\n  const value = $env[name];\n  if (value === undefined || value === null || value === '') {\n    if (fallback !== undefined) return fallback;\n    throw new Error(`n8n environment variable ${name} is not set`);\n  }\n  return String(value);\n}\n\nfunction hmacHex(secret, data) {\n  return crypto.createHmac('sha256', secret).update(data).digest('hex');\n}\n\nfunction safeEqual(a, b) {\n  const x = Buffer.from(String(a));\n  const y = Buffer.from(String(b));\n  return x.length === y.length && crypto.timingSafeEqual(x, y);\n}\n\n// Agent <-> n8n signature: \"t=<unix>,v1=<hex>\", v1 = HMAC-SHA256(secret, \"<t>.\" + rawBody)\nfunction verifyAgentSignature(secret, rawBody, header, maxSkewSeconds = 300, nowSeconds = Date.now() / 1000) {\n  if (!secret || !header) return false;\n  const parts = {};\n  for (const piece of String(header).split(',')) {\n    const i = piece.indexOf('=');\n    if (i > 0) parts[piece.slice(0, i).trim()] = piece.slice(i + 1).trim();\n  }\n  const t = Number.parseInt(parts.t, 10);\n  if (!Number.isFinite(t) || !parts.v1) return false;\n  if (Math.abs(nowSeconds - t) > maxSkewSeconds) return false;\n  return safeEqual(hmacHex(secret, `${t}.${rawBody}`), parts.v1);\n}\n\nfunction signAgent(secret, body, nowSeconds = Math.floor(Date.now() / 1000)) {\n  return `t=${nowSeconds},v1=${hmacHex(secret, `${nowSeconds}.${body}`)}`;\n}\n\n// Slack request signature: \"v0=\" + HMAC-SHA256(signing secret, \"v0:<ts>:\" + rawBody)\nfunction verifySlackSignature(secret, rawBody, timestamp, signature, nowSeconds = Date.now() / 1000) {\n  if (!secret || !timestamp || !signature) return false;\n  const ts = Number.parseInt(timestamp, 10);\n  if (!Number.isFinite(ts) || Math.abs(nowSeconds - ts) > 300) return false;\n  return safeEqual(`v0=${hmacHex(secret, `v0:${ts}:${rawBody}`)}`, signature);\n}\n\n// Raw request body from a Webhook node with the \"Raw Body\" option on.\nasync function rawBodyOf(helpers, item, index = 0) {\n  if (item.binary && item.binary.data) {\n    const buffer = await helpers.getBinaryDataBuffer(index, 'data');\n    return buffer.toString('utf8');\n  }\n  throw new Error('Webhook node must have the \"Raw Body\" option enabled');\n}\n\nfunction header(item, name) {\n  const headers = (item.json && item.json.headers) || {};\n  return headers[name.toLowerCase()] || '';\n}\n\nfunction slackBase() {\n  return env('SLACK_API_BASE', 'https://slack.com/api').replace(/\\/+$/, '');\n}\n\nasync function slackApi(helpers, method, payload) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}`, 'Content-Type': 'application/json; charset=utf-8' },\n    body: payload,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackGet(helpers, method, qs) {\n  const res = await helpers.httpRequest({\n    method: 'GET',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}` },\n    qs,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackUserIdByEmail(helpers, email) {\n  const res = await slackGet(helpers, 'users.lookupByEmail', { email });\n  return res.user.id;\n}\n\nasync function slackEmailOf(helpers, userId) {\n  const res = await slackGet(helpers, 'users.info', { user: userId });\n  const email = res.user && res.user.profile && res.user.profile.email;\n  if (!email) throw new Error('Slack user has no email (add the users:read.email scope)');\n  return email.toLowerCase();\n}\n\nasync function dm(helpers, email, text, blocks) {\n  const channel = await slackUserIdByEmail(helpers, email);\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\nasync function postToChannel(helpers, channel, text, blocks) {\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\n// n8n's Code-node sandbox has no URLSearchParams, so encode/decode forms by hand.\nfunction formEncode(fields) {\n  return Object.entries(fields)\n    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)\n    .join('&');\n}\n\nfunction formDecode(raw) {\n  const out = {};\n  for (const pair of String(raw || '').split('&')) {\n    if (!pair) continue;\n    const i = pair.indexOf('=');\n    const key = decodeURIComponent((i < 0 ? pair : pair.slice(0, i)).replace(/\\+/g, ' '));\n    out[key] = i < 0 ? '' : decodeURIComponent(pair.slice(i + 1).replace(/\\+/g, ' '));\n  }\n  return out;\n}\n\nfunction truncate(text, max) {\n  const s = String(text || '');\n  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;\n}\n\n// ---- weekly_reports.js ----\n// Code node (after a Schedule trigger): ask the agent to build and deliver each\n// tenant's weekly executive report. AGENT_TENANTS is a comma-separated list.\nconst helpers = this.helpers;\nconst base = env('AGENT_BASE_URL').replace(/\\/+$/, '');\nconst tenants = env('AGENT_TENANTS').split(',').map((t) => t.trim()).filter(Boolean);\nconst results = [];\nfor (const tenant of tenants) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: `${base}/v1/reports/weekly`,\n    qs: { tenant_id: tenant, deliver: 'true' },\n    headers: { 'x-webhook-secret': env('AGENT_WEBHOOK_SECRET') },\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n    json: true,\n  });\n  results.push({ json: { tenant, status: res.statusCode, delivered: res.body && res.body.delivered } });\n}\nreturn results;\n"
+      }
+    }
+  ],
+  "connections": {
+    "Every Monday 08:00": {
+      "main": [
+        [
+          {
+            "node": "Request reports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now": {
+      "main": [
+        [
+          {
+            "node": "Request reports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "meta": {
+    "description": "Asks the agent to build and deliver each tenant's weekly report (Tier 2)."
+  },
+  "pinData": {},
+  "active": false,
+  "tags": []
+}

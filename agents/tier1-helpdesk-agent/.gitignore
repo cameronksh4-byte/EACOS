@@ -5,3 +5,8 @@ __pycache__/
 terraform/.terraform/
 terraform/*.tfstate*
 terraform/*.tfvars
+
+# Per-client deploy config holds secrets: only the example is committed.
+deploy/*.env
+!deploy/deploy.env.example
+deploy/.venv/

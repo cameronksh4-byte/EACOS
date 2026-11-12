@@ -10,9 +10,26 @@ mock_provider "aws" {
     target = data.aws_iam_policy_document.ecs_assume
     values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
   }
+  override_resource {
+    target = aws_acm_certificate.agent
+    values = {
+      arn = "arn:aws:acm:us-east-1:123456789012:certificate/issued"
+      domain_validation_options = [{
+        domain_name           = "helpdesk.acme.com"
+        resource_record_name  = "_x.helpdesk.acme.com."
+        resource_record_type  = "CNAME"
+        resource_record_value = "_y.acm-validations.aws."
+      }]
+    }
+  }
+  override_resource {
+    target = aws_lb.agent
+    values = { arn = "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/x/1", arn_suffix = "app/x/1", dns_name = "x.elb.amazonaws.com", zone_id = "Z35SXDOTRQ7X7K" }
+  }
 }
 
 variables {
+  image_tag            = "3f9c2ab"
   client_slug          = "acme-corp"
   acm_certificate_arn  = "arn:aws:acm:us-east-1:123456789012:certificate/test"
   public_hostname      = "helpdesk.acme.com"
@@ -180,4 +197,72 @@ run "invalid_tier_rejected" {
     service_tier = "TIER_9_GOLD"
   }
   expect_failures = [var.service_tier]
+}
+
+run "latest_tag_rejected" {
+  command = plan
+  variables {
+    image_tag = "latest"
+  }
+  expect_failures = [var.image_tag]
+}
+
+run "no_certificate_and_no_zone_fails" {
+  command = plan
+  variables {
+    acm_certificate_arn = ""
+  }
+  expect_failures = [aws_acm_certificate.agent]
+}
+
+run "route53_issues_validates_and_aliases" {
+  command = plan
+  variables {
+    acm_certificate_arn = ""
+    route53_zone_id     = "Z0123456789ABC"
+  }
+  assert {
+    condition     = length(aws_acm_certificate.agent) == 1 && length(aws_route53_record.cert_validation) == 1
+    error_message = "certificate not issued and validated"
+  }
+  assert {
+    condition     = length(aws_acm_certificate_validation.agent) == 1
+    error_message = "listener would not wait for a validated certificate"
+  }
+  assert {
+    condition     = length(aws_route53_record.app) == 1 && aws_route53_record.app[0].name == "helpdesk.acme.com"
+    error_message = "DNS alias not created"
+  }
+}
+
+run "existing_certificate_needs_no_dns" {
+  command = plan
+  assert {
+    condition     = length(aws_acm_certificate.agent) == 0 && length(aws_route53_record.app) == 0
+    error_message = "should reuse the provided certificate"
+  }
+}
+
+run "alarms_and_waf_are_opt_in" {
+  command = plan
+  variables {
+    alarm_email = "ops@msp.com"
+    enable_waf  = true
+  }
+  assert {
+    condition     = length(aws_sns_topic.alarms) == 1 && length(aws_cloudwatch_metric_alarm.guarantees) == 3
+    error_message = "alarms missing"
+  }
+  assert {
+    condition     = length(aws_wafv2_web_acl.agent) == 1 && length(aws_wafv2_web_acl_association.agent) == 1
+    error_message = "WAF missing"
+  }
+}
+
+run "defaults_create_no_alarms_or_waf" {
+  command = plan
+  assert {
+    condition     = length(aws_sns_topic.alarms) == 0 && length(aws_wafv2_web_acl.agent) == 0
+    error_message = "opt-in resources created by default"
+  }
 }

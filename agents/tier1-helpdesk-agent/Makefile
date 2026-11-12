@@ -27,7 +27,7 @@ test-sql:
 	psql "$(SCRATCH_DB_URL)" -v ON_ERROR_STOP=1 -f supabase/tests/001_init_schema_test.sql
 
 lint:
-	ruff check --select E,F,B --ignore E501 app ingest tests scripts
+	ruff check --select E,F,B --ignore E501 app ingest tests scripts deploy integrations
 
 image:
 	docker buildx build --platform linux/arm64 -t $(IMAGE) --load .

@@ -1,0 +1,116 @@
+{
+  "name": "Help desk: Slack button clicks",
+  "nodes": [
+    {
+      "id": "adfd4975-83f8-5dc0-a901-91696d8ad803",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "helpdesk-slack-actions",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "bffc57a8-a8d7-5836-b0f1-5c7bca3b86bb"
+    },
+    {
+      "id": "2f56fc51-a238-5a05-8695-2cc951f99641",
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shared helpers, prepended to every Code node by build_workflows.py.\n// Runs inside n8n's Code node: `$env` and `this.helpers` are provided by n8n.\n// Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto and N8N_BLOCK_ENV_ACCESS_IN_NODE=false.\nconst crypto = require('crypto');\n\nfunction env(name, fallback) {\n  const value = $env[name];\n  if (value === undefined || value === null || value === '') {\n    if (fallback !== undefined) return fallback;\n    throw new Error(`n8n environment variable ${name} is not set`);\n  }\n  return String(value);\n}\n\nfunction hmacHex(secret, data) {\n  return crypto.createHmac('sha256', secret).update(data).digest('hex');\n}\n\nfunction safeEqual(a, b) {\n  const x = Buffer.from(String(a));\n  const y = Buffer.from(String(b));\n  return x.length === y.length && crypto.timingSafeEqual(x, y);\n}\n\n// Agent <-> n8n signature: \"t=<unix>,v1=<hex>\", v1 = HMAC-SHA256(secret, \"<t>.\" + rawBody)\nfunction verifyAgentSignature(secret, rawBody, header, maxSkewSeconds = 300, nowSeconds = Date.now() / 1000) {\n  if (!secret || !header) return false;\n  const parts = {};\n  for (const piece of String(header).split(',')) {\n    const i = piece.indexOf('=');\n    if (i > 0) parts[piece.slice(0, i).trim()] = piece.slice(i + 1).trim();\n  }\n  const t = Number.parseInt(parts.t, 10);\n  if (!Number.isFinite(t) || !parts.v1) return false;\n  if (Math.abs(nowSeconds - t) > maxSkewSeconds) return false;\n  return safeEqual(hmacHex(secret, `${t}.${rawBody}`), parts.v1);\n}\n\nfunction signAgent(secret, body, nowSeconds = Math.floor(Date.now() / 1000)) {\n  return `t=${nowSeconds},v1=${hmacHex(secret, `${nowSeconds}.${body}`)}`;\n}\n\n// Slack request signature: \"v0=\" + HMAC-SHA256(signing secret, \"v0:<ts>:\" + rawBody)\nfunction verifySlackSignature(secret, rawBody, timestamp, signature, nowSeconds = Date.now() / 1000) {\n  if (!secret || !timestamp || !signature) return false;\n  const ts = Number.parseInt(timestamp, 10);\n  if (!Number.isFinite(ts) || Math.abs(nowSeconds - ts) > 300) return false;\n  return safeEqual(`v0=${hmacHex(secret, `v0:${ts}:${rawBody}`)}`, signature);\n}\n\n// Raw request body from a Webhook node with the \"Raw Body\" option on.\nasync function rawBodyOf(helpers, item, index = 0) {\n  if (item.binary && item.binary.data) {\n    const buffer = await helpers.getBinaryDataBuffer(index, 'data');\n    return buffer.toString('utf8');\n  }\n  throw new Error('Webhook node must have the \"Raw Body\" option enabled');\n}\n\nfunction header(item, name) {\n  const headers = (item.json && item.json.headers) || {};\n  return headers[name.toLowerCase()] || '';\n}\n\nfunction slackBase() {\n  return env('SLACK_API_BASE', 'https://slack.com/api').replace(/\\/+$/, '');\n}\n\nasync function slackApi(helpers, method, payload) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}`, 'Content-Type': 'application/json; charset=utf-8' },\n    body: payload,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackGet(helpers, method, qs) {\n  const res = await helpers.httpRequest({\n    method: 'GET',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}` },\n    qs,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackUserIdByEmail(helpers, email) {\n  const res = await slackGet(helpers, 'users.lookupByEmail', { email });\n  return res.user.id;\n}\n\nasync function slackEmailOf(helpers, userId) {\n  const res = await slackGet(helpers, 'users.info', { user: userId });\n  const email = res.user && res.user.profile && res.user.profile.email;\n  if (!email) throw new Error('Slack user has no email (add the users:read.email scope)');\n  return email.toLowerCase();\n}\n\nasync function dm(helpers, email, text, blocks) {\n  const channel = await slackUserIdByEmail(helpers, email);\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\nasync function postToChannel(helpers, channel, text, blocks) {\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\n// n8n's Code-node sandbox has no URLSearchParams, so encode/decode forms by hand.\nfunction formEncode(fields) {\n  return Object.entries(fields)\n    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)\n    .join('&');\n}\n\nfunction formDecode(raw) {\n  const out = {};\n  for (const pair of String(raw || '').split('&')) {\n    if (!pair) continue;\n    const i = pair.indexOf('=');\n    const key = decodeURIComponent((i < 0 ? pair : pair.slice(0, i)).replace(/\\+/g, ' '));\n    out[key] = i < 0 ? '' : decodeURIComponent(pair.slice(i + 1).replace(/\\+/g, ' '));\n  }\n  return out;\n}\n\nfunction truncate(text, max) {\n  const s = String(text || '');\n  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;\n}\n\n// ---- verify_slack_action.js ----\n// Code node: verify a Slack interactivity request (button click) and parse it.\n// Slack needs a reply within 3 seconds, so the Respond node answers right after this,\n// and the slow work happens in the next node.\nconst helpers = this.helpers;\nconst item = $input.first();\nconst raw = await rawBodyOf(helpers, item);\nconst ok = verifySlackSignature(\n  env('SLACK_SIGNING_SECRET'), raw, header(item, 'x-slack-request-timestamp'), header(item, 'x-slack-signature'),\n);\nif (!ok) return [{ json: { ok: false, status: 401 } }];\n\nconst payload = JSON.parse(formDecode(raw).payload || '{}');\nconst action = (payload.actions || [])[0];\nif (payload.type !== 'block_actions' || !action) return [{ json: { ok: false, status: 200, ignored: true } }];\n\nlet value;\ntry {\n  value = JSON.parse(action.value || '{}');\n} catch (e) {\n  return [{ json: { ok: false, status: 200, ignored: true } }];\n}\nreturn [{\n  json: {\n    ok: true,\n    status: 200,\n    action_id: action.action_id,\n    value,\n    user_id: payload.user && payload.user.id,\n    response_url: payload.response_url,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "c95a0718-77ff-537f-89e2-5f02421bc940",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: $json.ok }) }}",
+        "options": {
+          "responseCode": "={{ $json.status }}"
+        }
+      }
+    },
+    {
+      "id": "16fb3467-4859-5f55-b964-e51441e26245",
+      "name": "Handle",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shared helpers, prepended to every Code node by build_workflows.py.\n// Runs inside n8n's Code node: `$env` and `this.helpers` are provided by n8n.\n// Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto and N8N_BLOCK_ENV_ACCESS_IN_NODE=false.\nconst crypto = require('crypto');\n\nfunction env(name, fallback) {\n  const value = $env[name];\n  if (value === undefined || value === null || value === '') {\n    if (fallback !== undefined) return fallback;\n    throw new Error(`n8n environment variable ${name} is not set`);\n  }\n  return String(value);\n}\n\nfunction hmacHex(secret, data) {\n  return crypto.createHmac('sha256', secret).update(data).digest('hex');\n}\n\nfunction safeEqual(a, b) {\n  const x = Buffer.from(String(a));\n  const y = Buffer.from(String(b));\n  return x.length === y.length && crypto.timingSafeEqual(x, y);\n}\n\n// Agent <-> n8n signature: \"t=<unix>,v1=<hex>\", v1 = HMAC-SHA256(secret, \"<t>.\" + rawBody)\nfunction verifyAgentSignature(secret, rawBody, header, maxSkewSeconds = 300, nowSeconds = Date.now() / 1000) {\n  if (!secret || !header) return false;\n  const parts = {};\n  for (const piece of String(header).split(',')) {\n    const i = piece.indexOf('=');\n    if (i > 0) parts[piece.slice(0, i).trim()] = piece.slice(i + 1).trim();\n  }\n  const t = Number.parseInt(parts.t, 10);\n  if (!Number.isFinite(t) || !parts.v1) return false;\n  if (Math.abs(nowSeconds - t) > maxSkewSeconds) return false;\n  return safeEqual(hmacHex(secret, `${t}.${rawBody}`), parts.v1);\n}\n\nfunction signAgent(secret, body, nowSeconds = Math.floor(Date.now() / 1000)) {\n  return `t=${nowSeconds},v1=${hmacHex(secret, `${nowSeconds}.${body}`)}`;\n}\n\n// Slack request signature: \"v0=\" + HMAC-SHA256(signing secret, \"v0:<ts>:\" + rawBody)\nfunction verifySlackSignature(secret, rawBody, timestamp, signature, nowSeconds = Date.now() / 1000) {\n  if (!secret || !timestamp || !signature) return false;\n  const ts = Number.parseInt(timestamp, 10);\n  if (!Number.isFinite(ts) || Math.abs(nowSeconds - ts) > 300) return false;\n  return safeEqual(`v0=${hmacHex(secret, `v0:${ts}:${rawBody}`)}`, signature);\n}\n\n// Raw request body from a Webhook node with the \"Raw Body\" option on.\nasync function rawBodyOf(helpers, item, index = 0) {\n  if (item.binary && item.binary.data) {\n    const buffer = await helpers.getBinaryDataBuffer(index, 'data');\n    return buffer.toString('utf8');\n  }\n  throw new Error('Webhook node must have the \"Raw Body\" option enabled');\n}\n\nfunction header(item, name) {\n  const headers = (item.json && item.json.headers) || {};\n  return headers[name.toLowerCase()] || '';\n}\n\nfunction slackBase() {\n  return env('SLACK_API_BASE', 'https://slack.com/api').replace(/\\/+$/, '');\n}\n\nasync function slackApi(helpers, method, payload) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}`, 'Content-Type': 'application/json; charset=utf-8' },\n    body: payload,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackGet(helpers, method, qs) {\n  const res = await helpers.httpRequest({\n    method: 'GET',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}` },\n    qs,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackUserIdByEmail(helpers, email) {\n  const res = await slackGet(helpers, 'users.lookupByEmail', { email });\n  return res.user.id;\n}\n\nasync function slackEmailOf(helpers, userId) {\n  const res = await slackGet(helpers, 'users.info', { user: userId });\n  const email = res.user && res.user.profile && res.user.profile.email;\n  if (!email) throw new Error('Slack user has no email (add the users:read.email scope)');\n  return email.toLowerCase();\n}\n\nasync function dm(helpers, email, text, blocks) {\n  const channel = await slackUserIdByEmail(helpers, email);\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\nasync function postToChannel(helpers, channel, text, blocks) {\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\n// n8n's Code-node sandbox has no URLSearchParams, so encode/decode forms by hand.\nfunction formEncode(fields) {\n  return Object.entries(fields)\n    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)\n    .join('&');\n}\n\nfunction formDecode(raw) {\n  const out = {};\n  for (const pair of String(raw || '').split('&')) {\n    if (!pair) continue;\n    const i = pair.indexOf('=');\n    const key = decodeURIComponent((i < 0 ? pair : pair.slice(0, i)).replace(/\\+/g, ' '));\n    out[key] = i < 0 ? '' : decodeURIComponent(pair.slice(i + 1).replace(/\\+/g, ' '));\n  }\n  return out;\n}\n\nfunction truncate(text, max) {\n  const s = String(text || '');\n  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;\n}\n\n// ---- handle_slack_action.js ----\n// Code node: turn a verified button click into a signed callback to the agent, then\n// update the Slack message with the outcome.\n//   approval_approve / approval_deny -> POST {AGENT_BASE_URL}/v1/callbacks/approval\n//   sop_ingest / sop_reject          -> POST {AGENT_BASE_URL}/v1/callbacks/sop-draft\n// The clicker's identity comes from Slack (users.info), never from the button value,\n// and the agent enforces \"only the designated approver\".\nconst helpers = this.helpers;\nconst click = $input.first().json;\nif (!click.ok) return [];\n\nconst base = env('AGENT_BASE_URL').replace(/\\/+$/, '');\nconst email = await slackEmailOf(helpers, click.user_id);\nlet path;\nlet body;\nif (click.value.k === 'approval') {\n  path = '/v1/callbacks/approval';\n  body = {\n    approval_id: click.value.a,\n    callback_nonce: click.value.n,\n    tenant_id: click.value.t,\n    decision: click.value.d,\n    decided_by_email: email,\n  };\n} else if (click.value.k === 'sop') {\n  path = '/v1/callbacks/sop-draft';\n  body = { tenant_id: click.value.t, draft_id: click.value.d, decision: click.value.x, reviewer_email: email };\n} else {\n  return [{ json: { ignored: click.action_id } }];\n}\n\nconst raw = JSON.stringify(body);\nlet status;\ntry {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: `${base}${path}`,\n    headers: { 'Content-Type': 'application/json', 'X-Agent-Signature': signAgent(env('N8N_CALLBACK_SECRET'), raw) },\n    body: raw,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n  status = res.statusCode;\n} catch (err) {\n  status = 0;\n}\n\nconst who = `<@${click.user_id}>`;\nconst messages = {\n  approval: {\n    200: body.decision === 'approved' ? `✅ Approved by ${who}. Setup has started.` : `❌ Denied by ${who}.`,\n    409: '⚠️ This request was already decided, has expired, or is waiting on someone else.',\n    403: '⚠️ This request belongs to a tenant this help desk doesn\\'t serve.',\n  },\n  sop: {\n    200: body.decision === 'approve' ? `✅ Ingested into the knowledge base by ${who}.` : `🗑️ Rejected by ${who}.`,\n    409: '⚠️ This draft was already reviewed.',\n    403: '⚠️ This draft belongs to a tenant this help desk doesn\\'t serve.',\n  },\n}[click.value.k];\nconst text = messages[status] || `⚠️ Couldn't record that (status ${status}). Please try again or tell IT.`;\n\nif (click.response_url) {\n  await helpers.httpRequest({\n    method: 'POST',\n    url: click.response_url,\n    body: { replace_original: status === 200, text },\n    json: true,\n  });\n}\nreturn [{ json: { status, path } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signature": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond": {
+      "main": [
+        [
+          {
+            "node": "Handle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "description": "Slack interactivity -> signed callbacks to the agent (approvals, SOP draft review)."
+  },
+  "pinData": {},
+  "active": false,
+  "tags": []
+}

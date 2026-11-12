@@ -122,58 +122,49 @@ Identity (Tier 1): `IDENTITY_PROVIDER=microsoft_graph` needs app permissions `Us
 failed sign-in count. `okta` needs an API token with read access to users and the System Log.
 `directory_cache` reads the `tenant_directory` table.
 
-## Deploy (AWS ECS Fargate, Graviton, zero NAT)
+## Deploy
 
-```hcl
-# terraform.tfvars (secrets: use an encrypted remote state backend)
-client_slug          = "acme-corp"
-public_hostname      = "helpdesk.acme.com"
-acm_certificate_arn  = "arn:aws:acm:us-east-1:…:certificate/…"
-service_tier         = "TIER_0_INCENTIVE"
-trial_expires_on     = "2026-12-31"
-llm_provider         = "anthropic"          # or "bedrock" (task role gets bedrock-mantle:CreateInference)
-supabase_url         = "…"
-supabase_service_key = "…"
-voyage_api_key       = "…"
-webhook_secret       = "…"
-llm_api_key          = "…"
-extra_environment    = { SLACK_ESCALATION_CHANNEL = "C0123" }
-integration_secrets  = { SLACK_BOT_TOKEN = "xoxb-…", SLACK_SIGNING_SECRET = "…" }
-```
+**Start here: [`deploy/DEPLOY.md`](deploy/DEPLOY.md).** It covers one config file and one command:
 
 ```bash
-cd terraform && terraform init && terraform apply
-aws ecr get-login-password | docker login --username AWS --password-stdin <ecr_repository_url>
-docker buildx build --platform linux/arm64 -t <ecr_repository_url>:latest --push ..
-aws ecs update-service --cluster acme-corp-cluster --service acme-corp-tier1-agent-service --force-new-deployment
+cp deploy/deploy.env.example deploy/acme-corp.env && chmod 600 deploy/acme-corp.env   # fill it in
+deploy/deploy.sh deploy/acme-corp.env --plan     # validate + dry run
+deploy/deploy.sh deploy/acme-corp.env            # build, deploy, load SOPs, smoke test
 ```
 
-Point `public_hostname` (a CNAME) at the `alb_dns_name` output. Tasks run in public subnets with
-ALB-only ingress, so there's no NAT Gateway. The ALB (~$16-20/month) provides the stable HTTPS endpoint
-Slack/Teams/Jira/n8n need. CPU autoscaling runs from `desired_count` to `max_count`.
+The script creates encrypted remote state, applies the Supabase schema, pushes an immutable
+linux/arm64 image (tag = git commit), applies Terraform (zero-NAT ECS Fargate on Graviton, ALB +
+ACM with optional Route 53 automation, Secrets Manager, CPU autoscaling, optional alarms and WAF),
+waits for the service, loads SOPs and the catalog, imports the n8n workflows, and smoke-tests over
+HTTPS. To have an AI coding agent run it with approval gates, use
+[`deploy/DEPLOY_PROMPT.md`](deploy/DEPLOY_PROMPT.md).
 
-**Upgrading a client** is a variable change plus that tier's settings. `terraform plan` fails
-with a clear message if anything is missing:
+**Upgrading a client** means editing `SERVICE_TIER` (plus that tier's settings) and re-running. A
+missing setting fails at `--plan`, before anything changes.
 
-| To | Set | Add |
-|---|---|---|
-| Tier 1 | `service_tier = "TIER_1_PRODUCTION"` | `N8N_APPROVAL_WEBHOOK_URL` (+ optional `IDENTITY_PROVIDER`, `GRAPH_*`/`OKTA_*`) in `extra_environment`; `N8N_OUTBOUND_SIGNING_SECRET`, `N8N_CALLBACK_SECRET` in `integration_secrets` |
-| Tier 2 | `service_tier = "TIER_2_MANAGED_OPS"` | `N8N_NOTIFY_WEBHOOK_URL` in `extra_environment` |
+## Integrations
 
-On Bedrock, enable Claude Haiku 5.5 and Sonnet 5.5 under *Bedrock → Model access* first.
-Server-side refusal fallbacks aren't available there. A refusal becomes a courteous decline.
+- **Slack:** `integrations/slack/app-manifest.yaml` (events → agent, button clicks → n8n).
+- **n8n:** `integrations/n8n/` holds 4 importable workflows (approval cards + Entra ID/Okta
+  provisioning, Slack button handling, notifications, weekly reports), generated from tested JS
+  sources and verified end to end inside n8n 2.47.5.
+- **Tier 1 data:** `python -m ingest.load_tenant_data --tenant … --catalog … --directory …`
+  (samples in `ingest/`).
 
 ## Testing
 
 ```bash
-make test       # 225 Python tests, offline (fake Supabase/Claude/Voyage/n8n), no API spend
+make test       # Python tests, offline (fake Supabase/Claude/Voyage/n8n), no API spend
 make test-sql   # migration + SQL behaviour checks against a scratch Postgres+pgvector (SCRATCH_DB_URL)
 make lint
-cd terraform && terraform test     # plan-only tests with a mocked AWS provider
+cd terraform && terraform test                        # plan-only tests with a mocked AWS provider
+node --test integrations/n8n/test/handlers.test.js   # n8n Code-node logic
+python integrations/n8n/test/e2e_n8n.py              # optional: inside real n8n (Node >= 24)
 ```
 
-CI (`.github/workflows/tier1-helpdesk-agent-tests.yml`) runs all four, plus a real linux/arm64
-image build and smoke test under QEMU.
+CI (`.github/workflows/tier1-helpdesk-agent-tests.yml`) runs the Python, SQL, Terraform and n8n
+checks, shellcheck on the deploy script, and a real linux/arm64 image build with a smoke test
+under QEMU.
 
 ## Operations
 
@@ -209,7 +200,9 @@ app/
     flywheel.py            resolved ticket → sanitized SOP draft → one-click ingest
     reports.py             weekly executive report
     chunking.py, notifier.py, signing.py, background.py, supabase_client.py, ticketing.py
-ingest/sync_docs.py        bulk SOP ingest CLI
+ingest/                    SOP ingest CLI, catalog/directory loader, samples
+deploy/                    deploy.sh, deploy.env.example, DEPLOY.md, DEPLOY_PROMPT.md, smoke test
+integrations/              Slack app manifest, n8n workflows (+ sources and tests)
 supabase/migrations/       schema, RLS, SQL functions; supabase/tests/ = SQL checks
 terraform/                 infrastructure + plan tests
 scripts/lock_requirements.py

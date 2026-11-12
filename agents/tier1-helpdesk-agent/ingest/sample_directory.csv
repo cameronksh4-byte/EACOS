@@ -1,0 +1,4 @@
+email,display_name,department,manager_email,os_platform,vip_status,devices,recent_auth_failures
+pat@acme.com,Pat Lee,Finance,boss@acme.com,macos,false,MacBook Pro|macos|15.1;iPhone 16|ios|18.1,0
+boss@acme.com,Sam Rivera,Finance,cfo@acme.com,windows,false,Surface Laptop 7|windows|11,0
+cfo@acme.com,Jordan Kim,Executive,,windows,true,ThinkPad X1|windows|11,2

@@ -1,0 +1,116 @@
+{
+  "name": "Help desk: approvals and provisioning",
+  "nodes": [
+    {
+      "id": "7861a1b2-5ac2-5e29-96bf-3b074c211e72",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "helpdesk-approvals",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "9ece3487-ca20-5ecc-b5d6-ee6dcb2f9b04"
+    },
+    {
+      "id": "b5d3b1b1-b27d-5d47-a874-8f5350a5ba96",
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shared helpers, prepended to every Code node by build_workflows.py.\n// Runs inside n8n's Code node: `$env` and `this.helpers` are provided by n8n.\n// Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto and N8N_BLOCK_ENV_ACCESS_IN_NODE=false.\nconst crypto = require('crypto');\n\nfunction env(name, fallback) {\n  const value = $env[name];\n  if (value === undefined || value === null || value === '') {\n    if (fallback !== undefined) return fallback;\n    throw new Error(`n8n environment variable ${name} is not set`);\n  }\n  return String(value);\n}\n\nfunction hmacHex(secret, data) {\n  return crypto.createHmac('sha256', secret).update(data).digest('hex');\n}\n\nfunction safeEqual(a, b) {\n  const x = Buffer.from(String(a));\n  const y = Buffer.from(String(b));\n  return x.length === y.length && crypto.timingSafeEqual(x, y);\n}\n\n// Agent <-> n8n signature: \"t=<unix>,v1=<hex>\", v1 = HMAC-SHA256(secret, \"<t>.\" + rawBody)\nfunction verifyAgentSignature(secret, rawBody, header, maxSkewSeconds = 300, nowSeconds = Date.now() / 1000) {\n  if (!secret || !header) return false;\n  const parts = {};\n  for (const piece of String(header).split(',')) {\n    const i = piece.indexOf('=');\n    if (i > 0) parts[piece.slice(0, i).trim()] = piece.slice(i + 1).trim();\n  }\n  const t = Number.parseInt(parts.t, 10);\n  if (!Number.isFinite(t) || !parts.v1) return false;\n  if (Math.abs(nowSeconds - t) > maxSkewSeconds) return false;\n  return safeEqual(hmacHex(secret, `${t}.${rawBody}`), parts.v1);\n}\n\nfunction signAgent(secret, body, nowSeconds = Math.floor(Date.now() / 1000)) {\n  return `t=${nowSeconds},v1=${hmacHex(secret, `${nowSeconds}.${body}`)}`;\n}\n\n// Slack request signature: \"v0=\" + HMAC-SHA256(signing secret, \"v0:<ts>:\" + rawBody)\nfunction verifySlackSignature(secret, rawBody, timestamp, signature, nowSeconds = Date.now() / 1000) {\n  if (!secret || !timestamp || !signature) return false;\n  const ts = Number.parseInt(timestamp, 10);\n  if (!Number.isFinite(ts) || Math.abs(nowSeconds - ts) > 300) return false;\n  return safeEqual(`v0=${hmacHex(secret, `v0:${ts}:${rawBody}`)}`, signature);\n}\n\n// Raw request body from a Webhook node with the \"Raw Body\" option on.\nasync function rawBodyOf(helpers, item, index = 0) {\n  if (item.binary && item.binary.data) {\n    const buffer = await helpers.getBinaryDataBuffer(index, 'data');\n    return buffer.toString('utf8');\n  }\n  throw new Error('Webhook node must have the \"Raw Body\" option enabled');\n}\n\nfunction header(item, name) {\n  const headers = (item.json && item.json.headers) || {};\n  return headers[name.toLowerCase()] || '';\n}\n\nfunction slackBase() {\n  return env('SLACK_API_BASE', 'https://slack.com/api').replace(/\\/+$/, '');\n}\n\nasync function slackApi(helpers, method, payload) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}`, 'Content-Type': 'application/json; charset=utf-8' },\n    body: payload,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackGet(helpers, method, qs) {\n  const res = await helpers.httpRequest({\n    method: 'GET',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}` },\n    qs,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackUserIdByEmail(helpers, email) {\n  const res = await slackGet(helpers, 'users.lookupByEmail', { email });\n  return res.user.id;\n}\n\nasync function slackEmailOf(helpers, userId) {\n  const res = await slackGet(helpers, 'users.info', { user: userId });\n  const email = res.user && res.user.profile && res.user.profile.email;\n  if (!email) throw new Error('Slack user has no email (add the users:read.email scope)');\n  return email.toLowerCase();\n}\n\nasync function dm(helpers, email, text, blocks) {\n  const channel = await slackUserIdByEmail(helpers, email);\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\nasync function postToChannel(helpers, channel, text, blocks) {\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\n// n8n's Code-node sandbox has no URLSearchParams, so encode/decode forms by hand.\nfunction formEncode(fields) {\n  return Object.entries(fields)\n    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)\n    .join('&');\n}\n\nfunction formDecode(raw) {\n  const out = {};\n  for (const pair of String(raw || '').split('&')) {\n    if (!pair) continue;\n    const i = pair.indexOf('=');\n    const key = decodeURIComponent((i < 0 ? pair : pair.slice(0, i)).replace(/\\+/g, ' '));\n    out[key] = i < 0 ? '' : decodeURIComponent(pair.slice(i + 1).replace(/\\+/g, ' '));\n  }\n  return out;\n}\n\nfunction truncate(text, max) {\n  const s = String(text || '');\n  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;\n}\n\n// ---- verify_agent.js ----\n// Code node: verify a webhook from the help desk agent and pass the event on.\n// Output: one item { ok, status, event, envelope }. The Respond node returns `status`,\n// and the handler node does nothing unless ok is true.\nconst helpers = this.helpers;\nconst item = $input.first();\nconst raw = await rawBodyOf(helpers, item);\nconst ok = verifyAgentSignature(env('N8N_AGENT_SIGNING_SECRET'), raw, header(item, 'x-agent-signature'));\nlet envelope = null;\nif (ok) {\n  try {\n    envelope = JSON.parse(raw);\n  } catch (e) {\n    return [{ json: { ok: false, status: 400, error: 'invalid json' } }];\n  }\n}\nreturn [{ json: { ok, status: ok ? 200 : 401, event: envelope ? envelope.event : null, envelope } }];\n"
+      }
+    },
+    {
+      "id": "3e93ce02-3113-5c14-92da-3383b22853ca",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: $json.ok }) }}",
+        "options": {
+          "responseCode": "={{ $json.status }}"
+        }
+      }
+    },
+    {
+      "id": "12871940-6a4c-52dd-8658-14479ff8a439",
+      "name": "Handle",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shared helpers, prepended to every Code node by build_workflows.py.\n// Runs inside n8n's Code node: `$env` and `this.helpers` are provided by n8n.\n// Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto and N8N_BLOCK_ENV_ACCESS_IN_NODE=false.\nconst crypto = require('crypto');\n\nfunction env(name, fallback) {\n  const value = $env[name];\n  if (value === undefined || value === null || value === '') {\n    if (fallback !== undefined) return fallback;\n    throw new Error(`n8n environment variable ${name} is not set`);\n  }\n  return String(value);\n}\n\nfunction hmacHex(secret, data) {\n  return crypto.createHmac('sha256', secret).update(data).digest('hex');\n}\n\nfunction safeEqual(a, b) {\n  const x = Buffer.from(String(a));\n  const y = Buffer.from(String(b));\n  return x.length === y.length && crypto.timingSafeEqual(x, y);\n}\n\n// Agent <-> n8n signature: \"t=<unix>,v1=<hex>\", v1 = HMAC-SHA256(secret, \"<t>.\" + rawBody)\nfunction verifyAgentSignature(secret, rawBody, header, maxSkewSeconds = 300, nowSeconds = Date.now() / 1000) {\n  if (!secret || !header) return false;\n  const parts = {};\n  for (const piece of String(header).split(',')) {\n    const i = piece.indexOf('=');\n    if (i > 0) parts[piece.slice(0, i).trim()] = piece.slice(i + 1).trim();\n  }\n  const t = Number.parseInt(parts.t, 10);\n  if (!Number.isFinite(t) || !parts.v1) return false;\n  if (Math.abs(nowSeconds - t) > maxSkewSeconds) return false;\n  return safeEqual(hmacHex(secret, `${t}.${rawBody}`), parts.v1);\n}\n\nfunction signAgent(secret, body, nowSeconds = Math.floor(Date.now() / 1000)) {\n  return `t=${nowSeconds},v1=${hmacHex(secret, `${nowSeconds}.${body}`)}`;\n}\n\n// Slack request signature: \"v0=\" + HMAC-SHA256(signing secret, \"v0:<ts>:\" + rawBody)\nfunction verifySlackSignature(secret, rawBody, timestamp, signature, nowSeconds = Date.now() / 1000) {\n  if (!secret || !timestamp || !signature) return false;\n  const ts = Number.parseInt(timestamp, 10);\n  if (!Number.isFinite(ts) || Math.abs(nowSeconds - ts) > 300) return false;\n  return safeEqual(`v0=${hmacHex(secret, `v0:${ts}:${rawBody}`)}`, signature);\n}\n\n// Raw request body from a Webhook node with the \"Raw Body\" option on.\nasync function rawBodyOf(helpers, item, index = 0) {\n  if (item.binary && item.binary.data) {\n    const buffer = await helpers.getBinaryDataBuffer(index, 'data');\n    return buffer.toString('utf8');\n  }\n  throw new Error('Webhook node must have the \"Raw Body\" option enabled');\n}\n\nfunction header(item, name) {\n  const headers = (item.json && item.json.headers) || {};\n  return headers[name.toLowerCase()] || '';\n}\n\nfunction slackBase() {\n  return env('SLACK_API_BASE', 'https://slack.com/api').replace(/\\/+$/, '');\n}\n\nasync function slackApi(helpers, method, payload) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}`, 'Content-Type': 'application/json; charset=utf-8' },\n    body: payload,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackGet(helpers, method, qs) {\n  const res = await helpers.httpRequest({\n    method: 'GET',\n    url: `${slackBase()}/${method}`,\n    headers: { Authorization: `Bearer ${env('SLACK_BOT_TOKEN')}` },\n    qs,\n    json: true,\n  });\n  if (!res || res.ok !== true) throw new Error(`Slack ${method} failed: ${res && res.error}`);\n  return res;\n}\n\nasync function slackUserIdByEmail(helpers, email) {\n  const res = await slackGet(helpers, 'users.lookupByEmail', { email });\n  return res.user.id;\n}\n\nasync function slackEmailOf(helpers, userId) {\n  const res = await slackGet(helpers, 'users.info', { user: userId });\n  const email = res.user && res.user.profile && res.user.profile.email;\n  if (!email) throw new Error('Slack user has no email (add the users:read.email scope)');\n  return email.toLowerCase();\n}\n\nasync function dm(helpers, email, text, blocks) {\n  const channel = await slackUserIdByEmail(helpers, email);\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\nasync function postToChannel(helpers, channel, text, blocks) {\n  return slackApi(helpers, 'chat.postMessage', { channel, text, ...(blocks ? { blocks } : {}) });\n}\n\n// n8n's Code-node sandbox has no URLSearchParams, so encode/decode forms by hand.\nfunction formEncode(fields) {\n  return Object.entries(fields)\n    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)\n    .join('&');\n}\n\nfunction formDecode(raw) {\n  const out = {};\n  for (const pair of String(raw || '').split('&')) {\n    if (!pair) continue;\n    const i = pair.indexOf('=');\n    const key = decodeURIComponent((i < 0 ? pair : pair.slice(0, i)).replace(/\\+/g, ' '));\n    out[key] = i < 0 ? '' : decodeURIComponent(pair.slice(i + 1).replace(/\\+/g, ' '));\n  }\n  return out;\n}\n\nfunction truncate(text, max) {\n  const s = String(text || '');\n  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;\n}\n\n// ---- handle_approvals.js ----\n// Code node: act on approval/provisioning events from the agent.\n//   approval.requested     -> DM the approver an interactive card, tell the requester\n//   provisioning.requested -> add the requester to the item's group (Entra ID / Okta)\n//   approval.denied        -> tell the requester\nconst helpers = this.helpers;\nconst { ok, envelope } = $input.first().json;\nif (!ok || !envelope) return [];\nconst event = envelope.event;\n\nasync function graphToken() {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: `https://login.microsoftonline.com/${env('GRAPH_TENANT_ID')}/oauth2/v2.0/token`,\n    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n    body: formEncode({\n      grant_type: 'client_credentials',\n      client_id: env('GRAPH_CLIENT_ID'),\n      client_secret: env('GRAPH_CLIENT_SECRET'),\n      scope: 'https://graph.microsoft.com/.default',\n    }),\n    json: true,\n  });\n  return res.access_token;\n}\n\nasync function addToEntraGroup(groupId, email) {\n  const token = await graphToken();\n  const auth = { Authorization: `Bearer ${token}` };\n  const user = await helpers.httpRequest({\n    method: 'GET',\n    url: `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}`,\n    qs: { $select: 'id' },\n    headers: auth,\n    json: true,\n  });\n  try {\n    await helpers.httpRequest({\n      method: 'POST',\n      url: `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(groupId)}/members/$ref`,\n      headers: { ...auth, 'Content-Type': 'application/json' },\n      body: { '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${user.id}` },\n      json: true,\n    });\n  } catch (err) {\n    // Already a member counts as success.\n    const text = JSON.stringify((err && (err.response || err.cause || err.message)) || '');\n    if (!/already exist/i.test(text)) throw err;\n  }\n}\n\nasync function addToOktaGroup(groupId, email) {\n  const auth = { Authorization: `SSWS ${env('OKTA_API_TOKEN')}`, Accept: 'application/json' };\n  const base = `https://${env('OKTA_DOMAIN')}`;\n  const user = await helpers.httpRequest({\n    method: 'GET', url: `${base}/api/v1/users/${encodeURIComponent(email)}`, headers: auth, json: true,\n  });\n  await helpers.httpRequest({\n    method: 'PUT',\n    url: `${base}/api/v1/groups/${encodeURIComponent(groupId)}/users/${encodeURIComponent(user.id)}`,\n    headers: auth,\n  });\n}\n\nfunction approvalCard(e) {\n  const cost = e.license_cost_usd ? ` · $${Number(e.license_cost_usd).toFixed(2)}/month` : '';\n  const value = (decision) => JSON.stringify({\n    k: 'approval', a: e.approval_id, n: e.callback_nonce, t: e.tenant_id, d: decision,\n  });\n  return [\n    {\n      type: 'section',\n      text: {\n        type: 'mrkdwn',\n        text: `*Approval needed:* ${e.item_display_name}${cost}\\n*Requested by:* ${e.requester_email}\\n` +\n          `*Ticket:* ${e.ticket_id}`,\n      },\n    },\n    ...(e.justification ? [{\n      type: 'section', text: { type: 'mrkdwn', text: `*Reason:*\\n>${truncate(e.justification, 1500)}` },\n    }] : []),\n    {\n      type: 'context',\n      elements: [{ type: 'mrkdwn', text: `Expires ${new Date(e.expires_at).toUTCString()}` }],\n    },\n    {\n      type: 'actions',\n      block_id: `approval:${e.approval_id}`,\n      elements: [\n        {\n          type: 'button', action_id: 'approval_approve', style: 'primary',\n          text: { type: 'plain_text', text: 'Approve' }, value: value('approved'),\n          confirm: {\n            title: { type: 'plain_text', text: 'Approve this request?' },\n            text: { type: 'mrkdwn', text: `${e.requester_email} will get ${e.item_display_name}.` },\n            confirm: { type: 'plain_text', text: 'Approve' },\n            deny: { type: 'plain_text', text: 'Cancel' },\n          },\n        },\n        {\n          type: 'button', action_id: 'approval_deny', style: 'danger',\n          text: { type: 'plain_text', text: 'Deny' }, value: value('denied'),\n        },\n      ],\n    },\n  ];\n}\n\nif (event === 'approval.requested') {\n  await dm(helpers, envelope.approver_email,\n    `Approval needed: ${envelope.item_display_name} for ${envelope.requester_email}`, approvalCard(envelope));\n  return [{ json: { done: event, approval_id: envelope.approval_id } }];\n}\n\nif (event === 'provisioning.requested') {\n  const provider = env('PROVISIONING_PROVIDER', 'none').toLowerCase();\n  const group = envelope.provisioning_group;\n  try {\n    if (!group || provider === 'none') {\n      throw new Error(group ? 'PROVISIONING_PROVIDER is none' : 'catalog item has no provisioning_group');\n    }\n    if (provider === 'entra') await addToEntraGroup(group, envelope.requester_email);\n    else if (provider === 'okta') await addToOktaGroup(group, envelope.requester_email);\n    else throw new Error(`unknown PROVISIONING_PROVIDER ${provider}`);\n    await dm(helpers, envelope.requester_email,\n      `✅ ${envelope.item_display_name} is being set up for you. It usually appears within the hour. ` +\n      `(Ticket ${envelope.ticket_id})`);\n    return [{ json: { done: event, provisioned: true } }];\n  } catch (err) {\n    await postToChannel(helpers, env('SLACK_ALERT_CHANNEL'),\n      `:warning: Manual provisioning needed for ${envelope.tenant_id}: add ${envelope.requester_email} ` +\n      `to ${envelope.item_display_name} (group ${group || 'n/a'}). Ticket ${envelope.ticket_id}. ` +\n      `Reason: ${truncate(err.message, 300)}`);\n    return [{ json: { done: event, provisioned: false, error: err.message } }];\n  }\n}\n\nif (event === 'approval.denied') {\n  const note = envelope.decision_note ? ` Note from your manager: \"${truncate(envelope.decision_note, 500)}\"` : '';\n  await dm(helpers, envelope.requester_email,\n    `Your request for ${envelope.item_display_name} wasn't approved.${note} ` +\n    `Reply to the help desk if you have questions. (Ticket ${envelope.ticket_id})`);\n  return [{ json: { done: event } }];\n}\n\nreturn [{ json: { ignored: event } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signature": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond": {
+      "main": [
+        [
+          {
+            "node": "Handle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "description": "Agent -> n8n (Tier 1): approval cards, group provisioning, denial notices."
+  },
+  "pinData": {},
+  "active": false,
+  "tags": []
+}

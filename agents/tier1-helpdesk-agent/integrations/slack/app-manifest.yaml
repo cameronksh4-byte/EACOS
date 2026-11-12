@@ -1,0 +1,46 @@
+# Slack app for the help desk agent. Create it at https://api.slack.com/apps
+# -> "Create New App" -> "From an app manifest", paste this file, then replace:
+#   HELPDESK_HOST  -> your public_hostname (e.g. helpdesk.acme.com)
+#   N8N_HOST       -> your n8n host (only needed for Tier 1+ approvals / Tier 2 SOP review)
+# After installing the app to your workspace, copy:
+#   Bot User OAuth Token   -> SLACK_BOT_TOKEN       (agent and n8n)
+#   Signing Secret         -> SLACK_SIGNING_SECRET  (agent and n8n)
+display_information:
+  name: IT Help Desk
+  description: Tier 1 IT help, answered from your company's own guides.
+  background_color: "#1f3b57"
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: IT Help Desk
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read      # @IT Help Desk in channels
+      - chat:write             # replies, approval cards, alerts
+      - im:history             # direct messages to the bot
+      - im:read
+      - im:write               # DM approvers and requesters (n8n)
+      - channels:history       # follow-up replies in public channel threads
+      - groups:history         # ... and in private channels the bot is in
+      - users:read
+      - users:read.email       # map Slack users to reporter/approver emails
+      - files:read             # read screenshots attached to tickets
+settings:
+  event_subscriptions:
+    request_url: https://HELPDESK_HOST/webhooks/slack
+    bot_events:
+      - app_mention
+      - message.im
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: true
+    request_url: https://N8N_HOST/webhook/helpdesk-slack-actions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

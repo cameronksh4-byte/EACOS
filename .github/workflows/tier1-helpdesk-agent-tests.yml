@@ -26,6 +26,23 @@ jobs:
       - run: python -m pytest -q
       - name: Lock file pins every direct dependency within requirements.in
         run: python scripts/lock_requirements.py --check
+      - name: Deploy script passes shellcheck
+        run: shellcheck -S warning deploy/deploy.sh
+
+  n8n:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Workflow JSON is generated from src/ (not hand-edited)
+        run: python integrations/n8n/build_workflows.py --check
+      - name: Code-node unit tests
+        run: node --test integrations/n8n/test/handlers.test.js
 
   schema:
     runs-on: ubuntu-latest

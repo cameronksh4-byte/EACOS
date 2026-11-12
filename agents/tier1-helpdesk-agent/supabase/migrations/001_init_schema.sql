@@ -826,3 +826,6 @@ $$;
 grant execute on function public.request_tenant_id() to authenticated;
 grant execute on function public.tenant_roi_summary(text, timestamptz, timestamptz) to authenticated;
 grant execute on function public.tenant_knowledge_gaps(text, timestamptz, int) to authenticated;
+
+-- Tell PostgREST (Supabase's REST layer) to pick up the new tables and functions now.
+notify pgrst, 'reload schema';
