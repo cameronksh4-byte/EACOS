@@ -31,6 +31,7 @@ def draft(**overrides) -> LLMTriageOutput:
         clarifying_question="",
         requested_item="",
         missing_sop_topic="",
+        known_facts=[],
         internal_tech_notes="",
     )
     base.update(overrides)

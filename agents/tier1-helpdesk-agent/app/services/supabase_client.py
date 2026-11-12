@@ -50,6 +50,23 @@ async def insert(table: str, row: dict[str, Any] | list[dict[str, Any]]) -> None
     resp.raise_for_status()
 
 
+async def insert_returning(table: str, row: dict[str, Any]) -> dict[str, Any]:
+    resp = await get_client().post(f"/{table}", json=row, headers=_headers({"Prefer": "return=representation"}))
+    resp.raise_for_status()
+    return resp.json()[0]
+
+
+async def insert_ignore(table: str, row: dict[str, Any], on_conflict: str) -> None:
+    """INSERT ... ON CONFLICT DO NOTHING (never overwrites an existing row)."""
+    resp = await get_client().post(
+        f"/{table}",
+        params={"on_conflict": on_conflict},
+        json=row,
+        headers=_headers({"Prefer": "resolution=ignore-duplicates,return=minimal"}),
+    )
+    resp.raise_for_status()
+
+
 async def upsert(table: str, row: dict[str, Any] | list[dict[str, Any]], on_conflict: str) -> None:
     resp = await get_client().post(
         f"/{table}",

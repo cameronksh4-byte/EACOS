@@ -211,6 +211,7 @@ def refusal_output() -> LLMTriageOutput:
         clarifying_question="",
         requested_item="",
         missing_sop_topic="",
+        known_facts=[],
         internal_tech_notes="Model declined the request; sent the standard out-of-scope reply.",
     )
 

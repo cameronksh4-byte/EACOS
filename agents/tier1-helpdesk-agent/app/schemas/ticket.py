@@ -232,6 +232,13 @@ class UserContext(_Strict):
 # =============================================================================
 
 
+class KnownFact(_Strict):
+    """One filled slot in a multi-turn conversation."""
+
+    name: str = Field(..., description="Short snake_case slot name, e.g. 'device', 'error_code', 'vpn_client'")
+    value: str = Field(..., description="The value, in the requester's words, at most 200 characters")
+
+
 class LLMTriageOutput(_Strict):
     """The structured output Claude must produce for a ticket."""
 
@@ -263,6 +270,9 @@ class LLMTriageOutput(_Strict):
     )
     missing_sop_topic: str = Field(
         ..., description="Short topic (max 8 words) of the SOP that would have answered this; '' if covered"
+    )
+    known_facts: List[KnownFact] = Field(
+        ..., description="Facts established so far that matter for the fix (slot-filling); [] if none"
     )
     internal_tech_notes: str = Field(..., description="Brief diagnostic summary for a technician; '' if none")
 
@@ -461,6 +471,23 @@ class ApprovalCallback(_Strict):
         return value
 
 
+class SOPDraftDecision(_Strict):
+    """What n8n POSTs to /v1/callbacks/sop-draft when the IT manager clicks [Ingest] or [Reject]."""
+
+    tenant_id: str = Field(..., pattern=r"^[a-z0-9-]{2,64}$")
+    draft_id: UUID
+    decision: Literal["approve", "reject"]
+    reviewer_email: str = Field(..., max_length=320)
+
+    @field_validator("reviewer_email")
+    @classmethod
+    def _valid_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not _EMAIL.match(value):
+            raise ValueError("reviewer_email is not an email address")
+        return value
+
+
 class ApprovalOutcome(_Strict):
     approval_id: UUID
     status: ApprovalStatus
@@ -574,6 +601,17 @@ class SOPDraft(_Strict):
     markdown: str = Field(..., max_length=50_000, description="Full document, YAML frontmatter included")
     nearest_doc_id: Optional[str] = None
     nearest_similarity: Optional[float] = Field(None, ge=-1.0, le=1.0)
+
+
+class WeeklyReport(_Strict):
+    tenant_id: str
+    generated_at: datetime
+    roi: ROISummary
+    previous_roi: ROISummary
+    sop_drafts_pending_review: int = Field(..., ge=0)
+    outage_incidents: int = Field(..., ge=0)
+    markdown: str
+    delivered: bool
 
 
 class FlywheelOutcome(_Strict):

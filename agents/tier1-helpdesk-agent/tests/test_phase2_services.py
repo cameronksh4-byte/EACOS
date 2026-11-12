@@ -1,10 +1,4 @@
-"""Phase 2: Tier 0 services and pipeline, against in-memory fakes (no network, no spend).
-
-Fakes:
-  * FakeSupabase: the RPCs and tables the services use.
-  * FakeClaude:   a MockTransport Anthropic client; responses by purpose.
-  * embed_query:  deterministic vectors.
-"""
+"""Phase 2: Tier 0 services and pipeline, against in-memory fakes (tests/fakes.py)."""
 
 from __future__ import annotations
 
@@ -13,9 +7,7 @@ import uuid
 from datetime import date
 
 import httpx
-import httpx2
 import pytest
-from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from fastapi.testclient import TestClient
 
 from app.config import Feature, ServiceTier, get_settings
@@ -41,152 +33,8 @@ from app.services import (
     ticketing,
     vision,
 )
+from tests.fakes import PNG, triage_output, vision_output
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
-
-
-# ---------------------------------------------------------------------------
-# Fakes
-# ---------------------------------------------------------------------------
-
-
-class FakeSupabase:
-    def __init__(self):
-        self.cap_ok = True
-        self.ledger_down = False
-        self.reservations: list[dict] = []
-        self.settled: list[dict] = []
-        self.sops: list[dict] = []
-        self.recent: dict[str, dict] = {}
-        self.burst_rows: list[dict] = []
-        self.incident = {"incident_id": str(uuid.uuid4()), "is_new": True, "needs_tier2_notification": True}
-        self.marked: list[str] = []
-        self.telemetry: list[dict] = []
-        self.rpc_calls: list[tuple[str, dict]] = []
-
-    async def rpc(self, fn, params):
-        self.rpc_calls.append((fn, params))
-        if fn == "try_reserve_llm_budget":
-            if self.ledger_down:
-                raise httpx.ConnectError("down")
-            if not self.cap_ok:
-                return None
-            self.reservations.append(params)
-            return f"res-{len(self.reservations)}"
-        if fn == "settle_llm_budget":
-            self.settled.append(params)
-            return True
-        if fn == "match_sop_chunks":
-            return [s for s in self.sops if params["p_os_platform"] in (None, s["os_platform"], "any")
-                    or s["os_platform"] == "any"]
-        if fn == "match_recent_tickets":
-            return self.burst_rows
-        if fn == "register_outage_cluster":
-            return [self.incident]
-        if fn == "mark_outage_tier2_notified":
-            self.marked.append(params["p_incident_id"])
-            return True
-        if fn == "tenant_roi_summary":
-            return [{"unique_tickets": 40, "total_triages": 52, "deflected_tickets": 22,
-                     "deflection_rate_pct": 55.0, "hours_saved": 5.5, "token_cost_usd": 0.31, "outage_tickets": 6}]
-        if fn == "tenant_knowledge_gaps":
-            return [{"topic": "adobe licence", "ticket_count": 4, "last_seen_at": None}]
-        raise AssertionError(f"unexpected rpc {fn}")
-
-    async def insert(self, table, row):
-        assert table == "ticket_telemetry"
-        self.telemetry.append(row)
-
-    async def upsert(self, table, row, on_conflict):
-        assert table == "recent_tickets" and on_conflict == "tenant_id,ticket_id"
-        self.recent[row["ticket_id"]] = row
-
-    async def update(self, table, filters, values):
-        return []
-
-    async def select(self, table, filters, columns="*", limit=None):
-        return []
-
-
-class FakeClaude:
-    """Returns canned JSON per purpose; records every request body."""
-
-    def __init__(self):
-        self.requests: list[dict] = []
-        self.triage = [_triage_output()]
-        self.vision = {"screenshots": [_vision_output()]}
-
-    def handler(self, request: httpx2.Request) -> httpx2.Response:
-        body = json.loads(request.content)
-        self.requests.append(body)
-        system = body["system"][0]["text"]
-        if system.startswith("You read screenshots"):
-            payload = self.vision
-        else:
-            index = min(len([r for r in self.requests if not r["system"][0]["text"].startswith("You read")]) - 1,
-                        len(self.triage) - 1)
-            payload = self.triage[index]
-        return httpx2.Response(200, json={
-            "id": "msg", "type": "message", "role": "assistant", "model": body["model"],
-            "content": [{"type": "text", "text": json.dumps(payload)}],
-            "stop_reason": "end_turn", "stop_sequence": None,
-            "usage": {"input_tokens": 1000, "output_tokens": 300},
-        })
-
-    def triage_calls(self):
-        return [r for r in self.requests if not r["system"][0]["text"].startswith("You read")]
-
-    def vision_calls(self):
-        return [r for r in self.requests if r["system"][0]["text"].startswith("You read")]
-
-
-def _triage_output(**kw):
-    base = {
-        "scope": "in_scope", "action": "RESOLVE", "category": "vpn_network", "severity": "P3_MEDIUM",
-        "confidence_score": 0.93, "requires_tier2_escalation": False, "cited_sop_ids": ["SOP-NET-001"],
-        "draft_user_reply": "1. Disconnect and reconnect GlobalProtect.", "clarifying_question": "",
-        "requested_item": "", "missing_sop_topic": "", "internal_tech_notes": "",
-    }
-    base.update(kw)
-    return base
-
-
-def _vision_output(**kw):
-    base = {"error_codes": ["0x80070005"], "dialog_text": "Access is denied.", "application_name": "GlobalProtect",
-            "ui_state": "Connection failed dialog.", "os_platform_hint": "windows", "contains_sensitive_data": False}
-    base.update(kw)
-    return base
-
-
-@pytest.fixture
-def env(monkeypatch):
-    sb = FakeSupabase()
-    for name in ("rpc", "insert", "upsert", "update", "select"):
-        monkeypatch.setattr(supabase_client, name, getattr(sb, name))
-
-    claude = FakeClaude()
-    client = AsyncAnthropic(api_key="test", max_retries=0,
-                            http_client=DefaultAsyncHttpxClient(transport=httpx2.MockTransport(claude.handler)))
-    monkeypatch.setattr(llm_client, "_client", client)
-
-    embedded: list[str] = []
-
-    async def fake_embed(text):
-        embedded.append(text)
-        return [0.1] * 1024
-
-    monkeypatch.setattr(rag, "embed_query", fake_embed)
-
-    notified: list[dict] = []
-
-    async def fake_notify(event, tenant_id, payload, text):
-        notified.append({"event": event, "payload": payload})
-        return True
-
-    monkeypatch.setattr(notifier, "notify_tier2", fake_notify)
-    sb.sops = [{"doc_id": "SOP-NET-001", "title": "VPN", "system_name": "GlobalProtect", "os_platform": "any",
-                "content": "1. Disconnect and reconnect", "similarity": 0.81}]
-    return {"sb": sb, "claude": claude, "embedded": embedded, "notified": notified}
 
 
 def ticket(**kw):
@@ -234,7 +82,7 @@ async def test_unreachable_ledger_fails_closed(env):
 
 
 async def test_budget_exhausted_before_second_opinion_keeps_first_answer(env, monkeypatch):
-    env["claude"].triage = [_triage_output(confidence_score=0.6)]
+    env["claude"].triage = [triage_output(confidence_score=0.6)]
     real_reserve = llm_client.reserve
     calls = {"n": 0}
 
@@ -268,7 +116,7 @@ def test_trial_not_expired_on_its_last_day():
 
 
 async def test_tier0_clarification_request_escalates_with_handoff(env):
-    env["claude"].triage = [_triage_output(action="ASK_CLARIFICATION", clarifying_question="Which VPN?",
+    env["claude"].triage = [triage_output(action="ASK_CLARIFICATION", clarifying_question="Which VPN?",
                                            cited_sop_ids=[], confidence_score=0.85)]
     result = await pipeline.process_ticket(ticket())
     assert result.action is TriageAction.ESCALATE_TIER_2
@@ -375,7 +223,7 @@ async def test_sensitive_screenshot_text_is_dropped(env, monkeypatch):
         return vision.FetchedImage("image/png", PNG)
 
     monkeypatch.setattr(vision, "fetch_image", fake_fetch)
-    env["claude"].vision = {"screenshots": [_vision_output(dialog_text="pw: hunter2", contains_sensitive_data=True)]}
+    env["claude"].vision = {"screenshots": [vision_output(dialog_text="pw: hunter2", contains_sensitive_data=True)]}
     await pipeline.process_ticket(ticket(attachment_urls=["https://files.slack.com/a.png"]))
     assert all("hunter2" not in t for t in env["embedded"])
     assert "hunter2" not in env["claude"].triage_calls()[0]["messages"][0]["content"][0]["text"]
@@ -443,7 +291,7 @@ async def test_fetch_enforces_byte_cap_type_and_no_redirects(monkeypatch):
 
 
 def test_scrub_keeps_codes_drops_text():
-    e = LLMVisionExtraction(**_vision_output(dialog_text="code 123456", contains_sensitive_data=True))
+    e = LLMVisionExtraction(**vision_output(dialog_text="code 123456", contains_sensitive_data=True))
     scrubbed = vision._scrub(e)
     assert scrubbed.error_codes == ["0x80070005"] and "123456" not in scrubbed.dialog_text
     assert scrubbed.os_platform_hint is OSPlatform.WINDOWS
@@ -459,7 +307,7 @@ async def test_embedding_outage_still_declines_out_of_scope(env, monkeypatch):
         raise httpx.ConnectError("voyage down")
 
     monkeypatch.setattr(rag, "embed_query", down)
-    env["claude"].triage = [_triage_output(scope="not_it_support", category="unknown", cited_sop_ids=[])]
+    env["claude"].triage = [triage_output(scope="not_it_support", category="unknown", cited_sop_ids=[])]
     result = await pipeline.process_ticket(ticket(subject="Write my wedding speech"))
     assert result.scope is ScopeVerdict.NOT_IT_SUPPORT and not result.requires_tier2_escalation
     assert "<retrieved_sops>\n(no SOPs matched" in env["claude"].triage_calls()[0]["messages"][0]["content"][0]["text"]
@@ -467,7 +315,7 @@ async def test_embedding_outage_still_declines_out_of_scope(env, monkeypatch):
 
 async def test_undocumented_issue_escalates_and_records_knowledge_gap(env):
     env["sb"].sops = []
-    env["claude"].triage = [_triage_output(action="ESCALATE_TIER_2", cited_sop_ids=[], confidence_score=0.9,
+    env["claude"].triage = [triage_output(action="ESCALATE_TIER_2", cited_sop_ids=[], confidence_score=0.9,
                                            missing_sop_topic="Outlook error 0x800CCC0E on macOS")]
     result = await pipeline.process_ticket(ticket())
     await background.drain()

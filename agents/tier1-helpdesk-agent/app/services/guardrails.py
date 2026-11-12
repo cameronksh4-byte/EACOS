@@ -280,3 +280,54 @@ def unavailable_result(payload: IncomingTicketWebhook, settings: Settings, reaso
         draft_user_reply=unavailable_message(settings, payload.ticket_id),
         internal_tech_notes=f"Automatic triage skipped: {reason}.",
     )
+
+
+def provisioning_message(settings: Settings, ticket_id: str, item: str) -> str:
+    return (
+        "Hi there, and thanks for your request!\n\n"
+        f"{item} doesn't need extra approval, so I've submitted it for automatic setup. It usually "
+        "appears within the hour. You may need to sign out and back in to see it.\n\n"
+        f"If it isn't there by then, just reply here. Your reference number is {ticket_id}."
+    )
+
+
+def escalated_thread_result(payload: IncomingTicketWebhook, settings: Settings) -> AgentTriageResult:
+    """A message on a thread already with Tier 2: no model call, the message goes to the technician."""
+    return AgentTriageResult(
+        ticket_id=payload.ticket_id,
+        thread_id=payload.thread_id,
+        service_tier=settings.service_tier.value,
+        action=TriageAction.ESCALATE_TIER_2,
+        category=TicketCategory.UNKNOWN,
+        severity=SeverityLevel.MEDIUM,
+        confidence_score=1.0,
+        requires_tier2_escalation=True,
+        draft_user_reply=(
+            "Thanks for the update! Your ticket is already with "
+            f"{settings.tier2_contact_hint}, and I've added your message so they'll see it.\n\n"
+            f"Your reference number is {payload.ticket_id}."
+        ),
+        internal_tech_notes="Requester added a message to an escalated thread.",
+    )
+
+
+def awaiting_approval_result(
+    payload: IncomingTicketWebhook, settings: Settings, approval_id: UUID, item: str
+) -> AgentTriageResult:
+    return AgentTriageResult(
+        ticket_id=payload.ticket_id,
+        thread_id=payload.thread_id,
+        service_tier=settings.service_tier.value,
+        action=TriageAction.AWAIT_MANAGER_APPROVAL,
+        approval_id=approval_id,
+        category=TicketCategory.SOFTWARE_ACCESS,
+        severity=SeverityLevel.LOW,
+        confidence_score=1.0,
+        requires_tier2_escalation=False,
+        draft_user_reply=(
+            f"Thanks for checking in! Your request for {item} is still waiting for approval. "
+            "I'll let you know as soon as there's a decision.\n\n"
+            f"Your reference number is {payload.ticket_id}."
+        ),
+        internal_tech_notes=f"Requester followed up while approval {approval_id} is pending.",
+    )

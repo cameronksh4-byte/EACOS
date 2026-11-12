@@ -206,6 +206,11 @@ class Settings(BaseSettings):
     graph_client_secret: SecretStr = SecretStr("")
     okta_domain: str = ""
     okta_api_token: SecretStr = SecretStr("")
+    identity_lookup_timeout_seconds: float = Field(4.0, gt=0, le=30)
+    # Deterministic VIP rule for live providers (the directory cache stores vip_status directly).
+    vip_job_title_keywords: Annotated[list[str], NoDecode] = [
+        "chief", "president", "vice president", "vp", "director", "ceo", "cfo", "cto", "coo", "ciso",
+    ]
 
     # --- Tier 1: multi-turn conversation --------------------------------------
     max_clarifying_questions: int = Field(2, ge=0, le=2)  # the DB enforces <= 2 as well
@@ -217,6 +222,8 @@ class Settings(BaseSettings):
     n8n_outbound_signing_secret: SecretStr = SecretStr("")  # we sign requests to n8n
     n8n_callback_secret: SecretStr = SecretStr("")  # n8n signs callbacks to us
     approval_ttl_hours: int = Field(72, ge=1, le=720)
+    public_base_url: HttpUrl | None = None  # where n8n reaches this API (approval callback URL)
+    it_manager_email: str = ""  # approver for approver_role = it_manager
     webhook_signature_max_skew_seconds: int = Field(300, ge=30, le=900)
 
     # --- Tier 2: flywheel & reports -------------------------------------------
@@ -238,7 +245,7 @@ class Settings(BaseSettings):
 
     # --- Validators -----------------------------------------------------------
 
-    @field_validator("allowed_tenant_ids", "attachment_allowed_hosts", mode="before")
+    @field_validator("allowed_tenant_ids", "attachment_allowed_hosts", "vip_job_title_keywords", mode="before")
     @classmethod
     def _csv_list(cls, value: Any) -> Any:
         return _split_csv(value)
@@ -328,6 +335,7 @@ class Settings(BaseSettings):
                 required["OKTA_API_TOKEN"] = self.okta_api_token.get_secret_value()
 
         if self.feature_enabled(Feature.MANAGER_APPROVALS):
+            required["PUBLIC_BASE_URL"] = self.public_base_url
             required["N8N_APPROVAL_WEBHOOK_URL"] = self.n8n_approval_webhook_url
             required["N8N_OUTBOUND_SIGNING_SECRET"] = self.n8n_outbound_signing_secret.get_secret_value()
             required["N8N_CALLBACK_SECRET"] = self.n8n_callback_secret.get_secret_value()
@@ -335,6 +343,8 @@ class Settings(BaseSettings):
         if self.feature_enabled(Feature.KNOWLEDGE_FLYWHEEL) or self.feature_enabled(Feature.EXECUTIVE_REPORTS):
             required["N8N_NOTIFY_WEBHOOK_URL"] = self.n8n_notify_webhook_url
             required["N8N_OUTBOUND_SIGNING_SECRET"] = self.n8n_outbound_signing_secret.get_secret_value()
+        if self.feature_enabled(Feature.KNOWLEDGE_FLYWHEEL):
+            required["N8N_CALLBACK_SECRET"] = self.n8n_callback_secret.get_secret_value()  # draft approvals
 
         return [name for name, value in required.items() if not value]
 

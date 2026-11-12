@@ -19,8 +19,9 @@ from typing import Any
 
 import httpx
 
-from app.config import get_settings
+from app.config import Feature, get_settings
 from app.schemas.ticket import AgentTriageResult, IncomingTicketWebhook
+from app.services import supabase_client
 from app.services.pipeline import process_ticket
 
 logger = logging.getLogger(__name__)
@@ -159,8 +160,32 @@ def slack_event_to_ticket(event: dict[str, Any]) -> tuple[str, str, str] | None:
     return None
 
 
+def slack_thread_reply(event: dict[str, Any]) -> tuple[str, str, str] | None:
+    """A plain reply inside a channel thread (no @mention), e.g. answering a clarifying question."""
+    if event.get("bot_id") or event.get("subtype") or event.get("type") != "message":
+        return None
+    thread_ts, ts = event.get("thread_ts"), event.get("ts")
+    text = _SLACK_MENTION.sub("", event.get("text", "")).strip()
+    if not thread_ts or thread_ts == ts or not text or event.get("channel_type") == "im":
+        return None
+    return event["channel"], thread_ts, text
+
+
+async def _known_thread(thread_id: str) -> bool:
+    rows = await supabase_client.select(
+        "conversation_threads",
+        {"tenant_id": supabase_client.eq(get_settings().tenant_id), "thread_id": supabase_client.eq(thread_id)},
+        columns="thread_id", limit=1,
+    )
+    return bool(rows)
+
+
 async def handle_slack_event(event: dict[str, Any]) -> None:
     parsed = slack_event_to_ticket(event)
+    if parsed is None and get_settings().feature_enabled(Feature.MULTI_TURN):
+        reply = slack_thread_reply(event)
+        if reply and await _known_thread(f"slack:{reply[0]}:{reply[1]}"):
+            parsed = reply
     if parsed is None:
         return
     channel, thread_ts, text = parsed
@@ -177,7 +202,9 @@ async def handle_slack_event(event: dict[str, Any]) -> None:
     )
     result = await process_ticket(ticket)
     await _slack_api("chat.postMessage", {"channel": channel, "thread_ts": thread_ts, "text": result.draft_user_reply})
-    if result.requires_tier2_escalation and settings.slack_escalation_channel:
+    # With multi-turn on, the pipeline notifies Tier 2 for the thread (and records it).
+    thread_handled = settings.feature_enabled(Feature.MULTI_TURN) and ticket.thread_id
+    if result.requires_tier2_escalation and settings.slack_escalation_channel and not thread_handled:
         await _slack_api(
             "chat.postMessage",
             {"channel": settings.slack_escalation_channel, "text": escalation_summary(ticket, result)},

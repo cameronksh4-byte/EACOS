@@ -69,12 +69,29 @@ async def embed_query(text: str) -> list[float]:
     return vector
 
 
+async def embed_documents(texts: list[str], batch: int = 64) -> list[list[float]]:
+    """Embed SOP text for storage (input_type=document)."""
+    settings = get_settings()
+    vectors: list[list[float]] = []
+    for i in range(0, len(texts), batch):
+        resp = await _voyage_client().post(
+            VOYAGE_EMBEDDINGS_URL,
+            headers={"Authorization": f"Bearer {settings.voyage_api_key.get_secret_value()}"},
+            json={"input": texts[i : i + batch], "model": settings.embedding_model,
+                  "input_type": "document", "output_dimension": settings.embedding_dimensions},
+        )
+        resp.raise_for_status()
+        vectors.extend(d["embedding"] for d in sorted(resp.json()["data"], key=lambda d: d["index"]))
+    return vectors
+
+
 async def retrieve_relevant_sops(
     tenant_id: str,
     query: str = "",
     top_k: int | None = None,
     os_platform: str | None = None,
     embedding: list[float] | None = None,
+    min_similarity: float | None = None,
 ) -> list[SopChunk]:
     """Closest SOP chunks for this tenant, best first. Raises on I/O errors."""
     settings = get_settings()
@@ -85,7 +102,7 @@ async def retrieve_relevant_sops(
             "p_tenant_id": tenant_id,
             "p_query_embedding": vector,
             "p_match_count": top_k or settings.rag_top_k,
-            "p_min_similarity": settings.rag_min_similarity,
+            "p_min_similarity": settings.rag_min_similarity if min_similarity is None else min_similarity,
             "p_os_platform": os_platform,
         },
     )

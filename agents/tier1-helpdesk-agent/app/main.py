@@ -6,7 +6,15 @@ Tier 0 (always available, kill-switchable):
     GET  /v1/telemetry/{tenant_id}/roi-summary    x-webhook-secret, ROI_TELEMETRY
     POST /webhooks/slack | /webhooks/teams | /webhooks/jira   platform signatures
 
-Tier 1 and Tier 2 routes are added in Phase 3 behind `require_feature`.
+Tier 1 (MANAGER_APPROVALS):
+    POST /v1/callbacks/approval                   n8n signature
+
+Tier 2 (KNOWLEDGE_FLYWHEEL, EXECUTIVE_REPORTS):
+    POST /v1/webhooks/ticket-resolved             x-webhook-secret
+    POST /v1/callbacks/sop-draft                  n8n signature
+    POST /v1/reports/weekly                       x-webhook-secret (called by an n8n schedule)
+
+Routes above the deployment's tier return 404.
 """
 
 from __future__ import annotations
@@ -18,16 +26,31 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from app.config import Feature, get_settings
-from app.gating import require_feature, require_tenant, require_webhook_secret
-from app.schemas.ticket import AgentTriageResult, IncomingTicketWebhook, ROISummary
+from app.gating import require_feature, require_n8n_signature, require_tenant, require_webhook_secret
+from app.schemas.ticket import (
+    AgentTriageResult,
+    ApprovalCallback,
+    ApprovalOutcome,
+    IncomingTicketWebhook,
+    ROISummary,
+    SOPDraftDecision,
+    TicketResolvedWebhook,
+    WeeklyReport,
+)
 from app.services import (
+    approvals,
     background,
+    context_enrichment,
+    conversation,
+    flywheel,
     llm_client,
     notifier,
     outage,
     rag,
+    reports,
     supabase_client,
     telemetry,
     ticketing,
@@ -40,19 +63,42 @@ logger = logging.getLogger("tier1_agent")
 
 TEAMS_SYNC_REPLY_SECONDS = 4.5  # Teams outgoing webhooks time out at 5s
 NOTIFICATION_RETRY_SECONDS = 60
+HOUSEKEEPING_EVERY_N_LOOPS = 5
+
+
+async def maintenance_tick(run_housekeeping: bool) -> None:
+    """One pass: DB housekeeping, then any owed Tier 2 notifications.
+
+    Housekeeping expires unanswered approvals and escalates their threads, so
+    pg_cron isn't required. It's idempotent, so several tasks running it is fine.
+    """
+    settings = get_settings()
+    if run_housekeeping:
+        try:
+            await supabase_client.rpc("run_housekeeping", {})
+        except Exception:  # noqa: BLE001
+            logger.exception("housekeeping failed")
+    if settings.feature_enabled(Feature.OUTAGE_DETECTION):
+        try:
+            if delivered := await outage.retry_pending_notifications():
+                logger.info("delivered %d pending outage notifications", delivered)
+        except Exception:  # noqa: BLE001
+            logger.exception("outage notification retry failed")
+    if settings.feature_enabled(Feature.MULTI_TURN) or settings.feature_enabled(Feature.MANAGER_APPROVALS):
+        try:
+            if delivered := await conversation.retry_pending_escalations():
+                logger.info("delivered %d pending thread escalations", delivered)
+        except Exception:  # noqa: BLE001
+            logger.exception("escalation notification retry failed")
 
 
 async def _notification_retry_loop() -> None:
     """Keep retrying owed Tier 2 notifications (guardrail #2 exemption controls)."""
+    loops = 0
     while True:
         await asyncio.sleep(NOTIFICATION_RETRY_SECONDS)
-        if get_settings().feature_enabled(Feature.OUTAGE_DETECTION):
-            try:
-                delivered = await outage.retry_pending_notifications()
-                if delivered:
-                    logger.info("delivered %d pending outage notifications", delivered)
-            except Exception:  # noqa: BLE001
-                logger.exception("outage notification retry failed")
+        loops += 1
+        await maintenance_tick(run_housekeeping=loops % HOUSEKEEPING_EVERY_N_LOOPS == 0)
 
 
 @asynccontextmanager
@@ -73,11 +119,11 @@ async def lifespan(_: FastAPI):
         await retry_task
     await background.drain()
     for close in (llm_client.aclose, rag.aclose, supabase_client.aclose, ticketing.aclose,
-                  vision.aclose, notifier.aclose):
+                  vision.aclose, notifier.aclose, context_enrichment.aclose):
         await close()
 
 
-app = FastAPI(title="Tier 1 IT Help Desk Agent", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Tier 1 IT Help Desk Agent", version="3.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -107,6 +153,71 @@ async def roi_summary(tenant_id: str, days: int = Query(30, ge=1, le=365)):
     except Exception as exc:  # noqa: BLE001
         logger.exception("roi summary failed tenant=%s", tenant_id)
         raise HTTPException(status_code=503, detail="telemetry store unavailable") from exc
+
+
+def _parse(model, body: bytes):
+    try:
+        return model.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_context=False)) from exc
+
+
+# --- Tier 1: approvals -----------------------------------------------------------
+
+
+@app.post(
+    "/v1/callbacks/approval",
+    response_model=ApprovalOutcome,
+    dependencies=[Depends(require_feature(Feature.MANAGER_APPROVALS))],
+)
+async def approval_callback(body: bytes = Depends(require_n8n_signature)):
+    callback: ApprovalCallback = _parse(ApprovalCallback, body)
+    require_tenant(callback.tenant_id)
+    outcome = await approvals.handle_callback(callback)
+    if outcome is None:
+        raise HTTPException(status_code=409, detail="approval not pending, expired, or not yours to decide")
+    return outcome
+
+
+# --- Tier 2: flywheel and reports ------------------------------------------------
+
+
+@app.post(
+    "/v1/webhooks/ticket-resolved",
+    status_code=202,
+    dependencies=[Depends(require_webhook_secret), Depends(require_feature(Feature.KNOWLEDGE_FLYWHEEL))],
+)
+async def ticket_resolved(event: TicketResolvedWebhook):
+    require_tenant(event.tenant_id)
+    # Synthesis can take a while; acknowledge now, notify the IT manager when done.
+    background.spawn(flywheel.process_resolved_ticket(event), f"flywheel {event.ticket_id}")
+    return {"accepted": True, "ticket_id": event.ticket_id}
+
+
+@app.post(
+    "/v1/callbacks/sop-draft",
+    dependencies=[Depends(require_feature(Feature.KNOWLEDGE_FLYWHEEL))],
+)
+async def sop_draft_callback(body: bytes = Depends(require_n8n_signature)):
+    decision: SOPDraftDecision = _parse(SOPDraftDecision, body)
+    require_tenant(decision.tenant_id)
+    outcome = await flywheel.apply_review(decision)
+    if outcome is None:
+        raise HTTPException(status_code=409, detail="draft not pending review")
+    return outcome
+
+
+@app.post(
+    "/v1/reports/weekly",
+    response_model=WeeklyReport,
+    dependencies=[Depends(require_webhook_secret), Depends(require_feature(Feature.EXECUTIVE_REPORTS))],
+)
+async def weekly_report(tenant_id: str = Query(..., pattern=r"^[a-z0-9-]{2,64}$"), deliver: bool = True):
+    require_tenant(tenant_id)
+    return await reports.weekly_report(tenant_id, deliver=deliver)
+
+
+# --- Chat integrations -----------------------------------------------------------
 
 
 @app.post("/webhooks/slack")
