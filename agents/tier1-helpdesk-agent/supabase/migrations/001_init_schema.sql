@@ -195,11 +195,19 @@ create table if not exists public.outage_incidents (
     first_seen_at     timestamptz not null default now(),
     last_seen_at      timestamptz not null default now(),
     resolved_at       timestamptz,
+    -- Guardrail #2 exemption control: outage broadcasts skip per-ticket escalation
+    -- only because the parent incident itself goes to Tier 2. Set once the Tier 2
+    -- notification is delivered; the app retries while it is null.
+    tier2_notified_at timestamptz,
     unique (tenant_id, incident_id)
 );
 
+alter table public.outage_incidents add column if not exists tier2_notified_at timestamptz;
+
 create index if not exists outage_incidents_active_idx
     on public.outage_incidents (tenant_id, last_seen_at desc) where status = 'active';
+create index if not exists outage_incidents_unnotified_idx
+    on public.outage_incidents (tenant_id, first_seen_at) where tier2_notified_at is null;
 
 -- Short-lived ticket embeddings. Kept 7 days (see run_housekeeping); detection
 -- only looks back 30 minutes.
@@ -256,18 +264,22 @@ $$;
 
 -- Open (or join) an outage for a cluster of matching tickets. A per-tenant
 -- advisory lock means a burst of simultaneous tickets yields one incident.
-create or replace function public.register_outage_cluster(
+-- needs_tier2_notification is true until mark_outage_tier2_notified is called.
+drop function if exists public.register_outage_cluster(text, text, text[], text);
+create function public.register_outage_cluster(
     p_tenant_id          text,
     p_ticket_id          text,
     p_matched_ticket_ids text[],
     p_title              text
 )
-returns uuid
+returns table (incident_id uuid, is_new boolean, needs_tier2_notification boolean)
 language plpgsql
 set search_path = public
 as $$
+#variable_conflict use_column
 declare
     v_incident uuid;
+    v_new      boolean := false;
     v_ids      text[] := array_append(coalesce(p_matched_ticket_ids, '{}'), p_ticket_id);
 begin
     perform pg_advisory_xact_lock(hashtextextended('outage:' || p_tenant_id, 0));
@@ -285,7 +297,8 @@ begin
     if v_incident is null then
         insert into public.outage_incidents (tenant_id, title)
         values (p_tenant_id, left(coalesce(nullif(btrim(p_title), ''), 'Possible service outage'), 200))
-        returning incident_id into v_incident;
+        returning outage_incidents.incident_id into v_incident;
+        v_new := true;
     end if;
 
     update public.recent_tickets
@@ -300,8 +313,25 @@ begin
            last_seen_at = now()
      where i.tenant_id = p_tenant_id and i.incident_id = v_incident;
 
-    return v_incident;
+    return query
+    select v_incident, v_new, i.tier2_notified_at is null
+    from public.outage_incidents i
+    where i.tenant_id = p_tenant_id and i.incident_id = v_incident;
 end;
+$$;
+
+create or replace function public.mark_outage_tier2_notified(p_tenant_id text, p_incident_id uuid)
+returns boolean
+language sql
+set search_path = public
+as $$
+    with marked as (
+        update public.outage_incidents
+           set tier2_notified_at = now()
+         where tenant_id = p_tenant_id and incident_id = p_incident_id and tier2_notified_at is null
+        returning 1
+    )
+    select exists (select 1 from marked);
 $$;
 
 -- =============================================================================
@@ -322,13 +352,22 @@ create table if not exists public.conversation_threads (
     last_action         text check (last_action in
                         ('RESOLVE','ASK_CLARIFICATION','AWAIT_MANAGER_APPROVAL','ESCALATE_TIER_2')),
     user_context        jsonb check (user_context is null or jsonb_typeof(user_context) = 'object'),
+    escalation_reason   text check (escalation_reason is null or length(escalation_reason) <= 200),
+    -- Set once Tier 2 has been told about an escalated thread; the app retries while null.
+    escalation_notified_at timestamptz,
     created_at          timestamptz not null default now(),
     updated_at          timestamptz not null default now(),
     expires_at          timestamptz not null default now() + interval '72 hours',
     primary key (tenant_id, thread_id)
 );
 
+alter table public.conversation_threads add column if not exists escalation_reason text;
+alter table public.conversation_threads add column if not exists escalation_notified_at timestamptz;
+
 create index if not exists conversation_threads_ticket_idx on public.conversation_threads (tenant_id, ticket_id);
+create index if not exists conversation_threads_unnotified_idx
+    on public.conversation_threads (tenant_id, updated_at)
+    where status = 'escalated' and escalation_notified_at is null;
 
 drop trigger if exists conversation_threads_updated_at on public.conversation_threads;
 create trigger conversation_threads_updated_at before update on public.conversation_threads
@@ -696,9 +735,21 @@ begin
        set status = 'resolved', resolved_at = now()
      where status = 'active' and last_seen_at < now() - interval '6 hours';
 
-    update public.approval_requests
-       set status = 'expired'
-     where status = 'pending' and expires_at <= now();
+    -- Guardrail #2 exemption control: an approval wait that times out is no
+    -- longer covered, so its thread escalates to Tier 2.
+    with expired as (
+        update public.approval_requests
+           set status = 'expired'
+         where status = 'pending' and expires_at <= now()
+        returning tenant_id, thread_id
+    )
+    update public.conversation_threads t
+       set status = 'escalated',
+           last_action = 'ESCALATE_TIER_2',
+           escalation_reason = 'approval_expired'
+      from expired e
+     where t.tenant_id = e.tenant_id and t.thread_id = e.thread_id
+       and t.status = 'awaiting_approval';
 
     update public.conversation_threads
        set status = 'expired'
@@ -755,7 +806,8 @@ begin
         where n.nspname = 'public'
           and p.proname in (
               'request_tenant_id','set_updated_at','utc_month_start','match_sop_chunks',
-              'match_recent_tickets','register_outage_cluster','increment_clarification',
+              'match_recent_tickets','register_outage_cluster','mark_outage_tier2_notified',
+              'increment_clarification',
               'decide_approval','tenant_roi_summary','tenant_knowledge_gaps','tenant_month_spend',
               'try_reserve_llm_budget','settle_llm_budget','run_housekeeping')
     loop

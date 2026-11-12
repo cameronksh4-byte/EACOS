@@ -264,13 +264,30 @@ class LLMTriageOutput(_Strict):
 class AgentTriageResult(_Strict):
     """What the API returns, after deterministic guardrails.
 
-    Hard guardrail #2 is enforced here, at construction: whenever the agent
-    would show troubleshooting steps (action RESOLVE, in scope), escalation is
-    forced if confidence < 0.80, the category is security_incident, or no SOP
-    is cited. Security incidents escalate whatever the action. The only
-    non-resolving outcomes are a clarifying question (no steps, capped at 2), an
-    approval wait, a courteous out-of-scope decline, and an outage broadcast
-    (the parent incident is escalated instead).
+    Hard guardrail #2 is enforced here, at construction, so no code path can
+    return a non-compliant result. Escalation is forced when confidence < 0.80,
+    the category is security_incident, or no SOP is cited, whenever the agent
+    would show troubleshooting steps. Security incidents escalate whatever the
+    outcome.
+
+    Four outcomes give no troubleshooting steps and so are exempt, but only
+    while the control that covers them is present. If that control is missing,
+    the exemption is dropped (fail closed) and guardrail #2 applies:
+
+    ===================  ==================================  ===========================
+    Exempt outcome       Covered by                          Required on this model
+    ===================  ==================================  ===========================
+    Clarifying question  2-question cap in the DB            thread_id, question text,
+                         (increment_clarification + CHECK)   1 <= clarifications_used <= 2
+    Approval wait        approval_requests row: expires,     approval_id
+                         escalates the thread on expiry
+    Out-of-scope decline Fixed courteous template; no        (forced: no citations,
+                         steps, nothing cited                category unknown)
+    Outage broadcast     Parent incident escalated to        parent_incident_id
+                         Tier 2 (outage_incidents)
+    ===================  ==================================  ===========================
+
+    Each override applied is recorded in `guardrail_overrides` for audit.
     """
 
     model_config = ConfigDict(extra="forbid", validate_assignment=False)
@@ -296,31 +313,70 @@ class AgentTriageResult(_Strict):
     missing_sop_topic: Optional[str] = Field(None, max_length=200)
     service_tier: Optional[str] = None
     model_used: Optional[str] = None
+    guardrail_overrides: List[str] = Field(default_factory=list)
+
+    def _override(self, note: str) -> None:
+        if note not in self.guardrail_overrides:
+            self.guardrail_overrides.append(note)
+
+    def _escalate(self, note: str) -> None:
+        if self.action is not TriageAction.ESCALATE_TIER_2 or not self.requires_tier2_escalation:
+            self._override(note)
+        self.action = TriageAction.ESCALATE_TIER_2
+        self.requires_tier2_escalation = True
 
     @model_validator(mode="after")
     def _hard_guardrails(self) -> "AgentTriageResult":
-        if self.category is TicketCategory.SECURITY_INCIDENT and self.scope is ScopeVerdict.IN_SCOPE:
-            self.requires_tier2_escalation = True
-            if self.action is TriageAction.RESOLVE:
-                self.action = TriageAction.ESCALATE_TIER_2
+        # Out-of-scope decline: exempt, and forced to carry no steps or citations.
+        if self.scope is ScopeVerdict.NOT_IT_SUPPORT:
+            if self.cited_sop_ids:
+                self._override("decline_citations_removed")
+            self.cited_sop_ids = []
+            self.category = TicketCategory.UNKNOWN
+            self.action = TriageAction.RESOLVE
+            self.requires_tier2_escalation = False
+            self.active_outage_detected = False
+            self.parent_incident_id = None
+            self.clarifying_question = None
+            self.approval_id = None
+            return self
 
         if self.scope is ScopeVerdict.BEYOND_TIER1:
-            self.requires_tier2_escalation = True
-            self.action = TriageAction.ESCALATE_TIER_2
+            self._escalate("beyond_tier1")
+            return self
 
-        if self.scope is ScopeVerdict.IN_SCOPE and self.action is TriageAction.RESOLVE and not self.active_outage_detected:
-            if self.confidence_score < CONFIDENCE_THRESHOLD or not self.cited_sop_ids:
-                self.requires_tier2_escalation = True
+        # In scope. First drop any exemption whose covering control is missing.
+        if self.active_outage_detected and self.parent_incident_id is None:
+            self.active_outage_detected = False
+            self._override("outage_without_parent_incident")
+
+        if self.action is TriageAction.ASK_CLARIFICATION and not (
+            self.clarifying_question and self.thread_id and 1 <= self.clarifications_used <= 2
+        ):
+            self._escalate("clarification_not_backed_by_capped_thread")
+
+        if self.action is TriageAction.AWAIT_MANAGER_APPROVAL and self.approval_id is None:
+            self._escalate("approval_wait_without_approval_record")
+
+        # Security incidents always go to a human, whatever the outcome.
+        if self.category is TicketCategory.SECURITY_INCIDENT:
+            if not self.requires_tier2_escalation:
+                self._override("security_incident")
+            self.requires_tier2_escalation = True
+            if self.action in (TriageAction.RESOLVE, TriageAction.AWAIT_MANAGER_APPROVAL) and not self.active_outage_detected:
                 self.action = TriageAction.ESCALATE_TIER_2
+
+        # Guardrail #2 for any outcome that shows troubleshooting steps.
+        if self.action is TriageAction.RESOLVE and not self.active_outage_detected:
+            if self.confidence_score < CONFIDENCE_THRESHOLD:
+                self._escalate("confidence_below_threshold")
+            elif not self.cited_sop_ids:
+                self._escalate("no_cited_sop")
+            elif self.requires_tier2_escalation:
+                self._escalate("escalation_requested")
 
         if self.action is TriageAction.ESCALATE_TIER_2:
             self.requires_tier2_escalation = True
-        if self.action is TriageAction.ASK_CLARIFICATION and not self.clarifying_question:
-            raise ValueError("ASK_CLARIFICATION requires clarifying_question")
-        if self.action is TriageAction.AWAIT_MANAGER_APPROVAL and self.approval_id is None:
-            raise ValueError("AWAIT_MANAGER_APPROVAL requires approval_id")
-        if self.active_outage_detected and self.parent_incident_id is None:
-            raise ValueError("active_outage_detected requires parent_incident_id")
         return self
 
     @property

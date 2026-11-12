@@ -206,36 +206,93 @@ def test_guardrail_forces_escalation(override):
 
 def test_security_incident_escalates_even_when_asking_a_question():
     r = _result(category=TicketCategory.SECURITY_INCIDENT, action=TriageAction.ASK_CLARIFICATION,
-                clarifying_question="Did you enter your password?")
+                clarifying_question="Did you enter your password?", thread_id="TH1", clarifications_used=1)
     assert r.requires_tier2_escalation is True
+    assert "security_incident" in r.guardrail_overrides
 
 
-def test_clarifying_question_is_not_forced_to_escalate_and_needs_text():
+# --- Exemption 1: clarifying question, covered by the DB-capped thread -------
+
+
+def test_clarifying_question_backed_by_capped_thread_is_exempt():
     r = _result(action=TriageAction.ASK_CLARIFICATION, cited_sop_ids=[], confidence_score=0.5,
-                clarifying_question="Which VPN client do you use?")
+                clarifying_question="Which VPN client do you use?", thread_id="TH1", clarifications_used=1)
     assert r.action is TriageAction.ASK_CLARIFICATION and not r.requires_tier2_escalation
+    assert r.guardrail_overrides == []
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        {"clarifying_question": None, "thread_id": "TH1", "clarifications_used": 1},  # no question
+        {"clarifying_question": "Which VPN?", "thread_id": None, "clarifications_used": 1},  # no thread (Tier 0)
+        {"clarifying_question": "Which VPN?", "thread_id": "TH1", "clarifications_used": 0},  # slot not spent
+    ],
+)
+def test_clarifying_question_without_its_control_escalates(missing):
+    r = _result(action=TriageAction.ASK_CLARIFICATION, cited_sop_ids=[], confidence_score=0.5, **missing)
+    assert r.action is TriageAction.ESCALATE_TIER_2 and r.requires_tier2_escalation
+    assert "clarification_not_backed_by_capped_thread" in r.guardrail_overrides
+
+
+def test_a_third_clarifying_question_is_impossible():
     with pytest.raises(ValidationError):
-        _result(action=TriageAction.ASK_CLARIFICATION, clarifying_question=None)
+        _result(action=TriageAction.ASK_CLARIFICATION, clarifying_question="?", thread_id="TH1",
+                clarifications_used=3)
 
 
-def test_outage_broadcast_needs_parent_incident():
-    r = _result(active_outage_detected=True, parent_incident_id=uuid4(), cited_sop_ids=[])
+# --- Exemption 2: approval wait, covered by an approval record ---------------
+
+
+def test_approval_wait_with_record_is_exempt_without_it_escalates():
+    ok = _result(action=TriageAction.AWAIT_MANAGER_APPROVAL, approval_id=uuid4(), cited_sop_ids=[])
+    assert ok.action is TriageAction.AWAIT_MANAGER_APPROVAL and not ok.requires_tier2_escalation
+    bad = _result(action=TriageAction.AWAIT_MANAGER_APPROVAL, cited_sop_ids=[])
+    assert bad.action is TriageAction.ESCALATE_TIER_2 and bad.requires_tier2_escalation
+    assert "approval_wait_without_approval_record" in bad.guardrail_overrides
+
+
+# --- Exemption 3: courteous decline, no steps or citations ------------------
+
+
+def test_decline_is_exempt_and_stripped_of_citations():
+    d = _result(scope=ScopeVerdict.NOT_IT_SUPPORT, cited_sop_ids=["SOP-NET-001"], confidence_score=0.3,
+                category=TicketCategory.VPN_NETWORK, requires_tier2_escalation=True)
+    assert d.cited_sop_ids == [] and d.category is TicketCategory.UNKNOWN
+    assert not d.requires_tier2_escalation and not d.deflected
+    assert "decline_citations_removed" in d.guardrail_overrides
+
+
+# --- Exemption 4: outage broadcast, covered by the escalated parent incident -
+
+
+def test_outage_broadcast_with_parent_incident_is_exempt():
+    r = _result(active_outage_detected=True, parent_incident_id=uuid4(), cited_sop_ids=[], confidence_score=0.4)
     assert r.active_outage_detected and not r.requires_tier2_escalation
-    with pytest.raises(ValidationError):
-        _result(active_outage_detected=True)
+    assert r.action is TriageAction.RESOLVE
 
 
-def test_approval_wait_needs_approval_id():
-    with pytest.raises(ValidationError):
-        _result(action=TriageAction.AWAIT_MANAGER_APPROVAL)
-    assert _result(action=TriageAction.AWAIT_MANAGER_APPROVAL, approval_id=uuid4()).approval_id
+def test_outage_broadcast_without_parent_incident_falls_back_to_guardrail():
+    r = _result(active_outage_detected=True, cited_sop_ids=[])
+    assert not r.active_outage_detected
+    assert r.requires_tier2_escalation and r.action is TriageAction.ESCALATE_TIER_2
+    assert {"outage_without_parent_incident", "no_cited_sop"} <= set(r.guardrail_overrides)
 
 
-def test_beyond_tier1_always_escalates_and_decline_is_not_deflection():
+def test_security_outage_still_escalates():
+    r = _result(active_outage_detected=True, parent_incident_id=uuid4(), cited_sop_ids=[],
+                category=TicketCategory.SECURITY_INCIDENT)
+    assert r.requires_tier2_escalation
+
+
+def test_beyond_tier1_always_escalates():
     r = _result(scope=ScopeVerdict.BEYOND_TIER1)
     assert r.requires_tier2_escalation and r.action is TriageAction.ESCALATE_TIER_2
-    d = _result(scope=ScopeVerdict.NOT_IT_SUPPORT, cited_sop_ids=[], category=TicketCategory.UNKNOWN)
-    assert not d.requires_tier2_escalation and not d.deflected
+
+
+def test_model_requested_escalation_on_a_resolve_is_honoured():
+    r = _result(requires_tier2_escalation=True)
+    assert r.action is TriageAction.ESCALATE_TIER_2
 
 
 # ---------------------------------------------------------------------------

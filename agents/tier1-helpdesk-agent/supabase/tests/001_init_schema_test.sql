@@ -57,21 +57,29 @@ insert into recent_tickets (tenant_id, ticket_id, summary, embedding, created_at
 do $$
 declare
     matched text[];
-    inc1 uuid; inc2 uuid;
+    r1 record; r2 record;
 begin
     select array_agg(ticket_id order by ticket_id) into matched
     from match_recent_tickets('acme', pg_temp.axis(1), 30, 0.88, 'NEW');
     assert matched = array['T1','T2','T3','T4','T5'], format('burst match wrong: %s', matched);
 
-    inc1 := register_outage_cluster('acme', 'NEW', matched, 'VPN outage');
-    assert inc1 is not null;
-    assert (select ticket_count from outage_incidents where incident_id = inc1) = 6, 'ticket_count wrong';
+    select * into r1 from register_outage_cluster('acme', 'NEW', matched, 'VPN outage');
+    assert r1.incident_id is not null and r1.is_new and r1.needs_tier2_notification;
+    assert (select ticket_count from outage_incidents where incident_id = r1.incident_id) = 6, 'ticket_count wrong';
 
     -- A later ticket joins the same active incident instead of opening a new one.
     insert into recent_tickets (tenant_id, ticket_id, summary, embedding) values ('acme', 'NEW2', 'VPN', pg_temp.axis(1));
-    inc2 := register_outage_cluster('acme', 'NEW2', array['T1','NEW'], 'VPN outage again');
-    assert inc2 = inc1, 'second burst opened a duplicate incident';
+    select * into r2 from register_outage_cluster('acme', 'NEW2', array['T1','NEW'], 'VPN outage again');
+    assert r2.incident_id = r1.incident_id and not r2.is_new, 'second burst opened a duplicate incident';
+    assert r2.needs_tier2_notification, 'notification flag cleared before delivery';
     assert (select count(*) from outage_incidents where tenant_id = 'acme') = 1;
+
+    -- Exemption control: Tier 2 is told exactly once; other tenants can't mark it.
+    assert not mark_outage_tier2_notified('globex', r1.incident_id), 'cross-tenant mark';
+    assert mark_outage_tier2_notified('acme', r1.incident_id);
+    assert not mark_outage_tier2_notified('acme', r1.incident_id), 'marked twice';
+    select * into r2 from register_outage_cluster('acme', 'NEW2', array['T1'], 'x');
+    assert not r2.needs_tier2_notification;
 end $$;
 
 -- ---------------------------------------------------------------------------
@@ -244,12 +252,22 @@ end $$;
 reset role;
 
 -- ---------------------------------------------------------------------------
--- Housekeeping runs and expires stale rows
+-- Housekeeping: an unanswered approval expires AND escalates its thread
+-- (the approval-wait exemption from guardrail #2 ends with the approval)
 -- ---------------------------------------------------------------------------
+update conversation_threads set status = 'awaiting_approval', last_action = 'AWAIT_MANAGER_APPROVAL'
+ where tenant_id = 'acme' and thread_id = 'TH1';
 update approval_requests set status = 'pending', decided_at = null, decided_by = null,
        expires_at = now() - interval '1 minute';
 select run_housekeeping();
-do $$ begin assert (select status from approval_requests limit 1) = 'expired'; end $$;
+do $$
+declare t conversation_threads;
+begin
+    assert (select status from approval_requests limit 1) = 'expired';
+    select * into t from conversation_threads where tenant_id = 'acme' and thread_id = 'TH1';
+    assert t.status = 'escalated' and t.last_action = 'ESCALATE_TIER_2', format('thread not escalated: %s', t.status);
+    assert t.escalation_reason = 'approval_expired' and t.escalation_notified_at is null;
+end $$;
 
 \echo 'ALL SCHEMA CHECKS PASSED'
 rollback;
