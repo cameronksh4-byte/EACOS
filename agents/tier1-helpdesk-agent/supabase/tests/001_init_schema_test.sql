@@ -62,6 +62,10 @@ begin
     select array_agg(ticket_id order by ticket_id) into matched
     from match_recent_tickets('acme', pg_temp.axis(1), 30, 0.88, 'NEW');
     assert matched = array['T1','T2','T3','T4','T5'], format('burst match wrong: %s', matched);
+    update recent_tickets set category = 'vpn_network' where tenant_id = 'acme' and ticket_id = 'T3';
+    assert (select array_agg(category) filter (where category is not null)
+            from match_recent_tickets('acme', pg_temp.axis(1), 30, 0.88, 'NEW')) = array['vpn_network'],
+        'category not returned for cluster inheritance';
 
     select * into r1 from register_outage_cluster('acme', 'NEW', matched, 'VPN outage');
     assert r1.incident_id is not null and r1.is_new and r1.needs_tier2_notification;

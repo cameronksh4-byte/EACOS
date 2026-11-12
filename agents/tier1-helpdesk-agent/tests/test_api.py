@@ -41,7 +41,7 @@ def client(monkeypatch):
 
 
 def test_health(client):
-    assert client.get("/health").json() == {"status": "healthy"}
+    assert client.get("/health").json()["status"] == "healthy"
 
 
 def test_triage_rejects_bad_secret(client):

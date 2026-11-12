@@ -296,6 +296,11 @@ class Settings(BaseSettings):
 
     # --- Startup validation ---------------------------------------------------
 
+    def tier2_channel_configured(self) -> bool:
+        n8n = bool(self.n8n_notify_webhook_url) and bool(self.n8n_outbound_signing_secret.get_secret_value())
+        slack = bool(self.slack_escalation_channel) and bool(self.slack_bot_token.get_secret_value())
+        return n8n or slack
+
     def missing_core_settings(self) -> list[str]:
         """Settings the API can't run without at the configured tier and provider."""
         required: dict[str, Any] = {
@@ -307,6 +312,11 @@ class Settings(BaseSettings):
         }
         if self.llm_provider is LLMProvider.ANTHROPIC:
             required["ANTHROPIC_API_KEY / LLM_API_KEY"] = self.anthropic_api_key.get_secret_value()
+
+        if self.feature_enabled(Feature.OUTAGE_DETECTION) and not self.tier2_channel_configured():
+            # Outage broadcasts skip per-ticket escalation only because the parent
+            # incident is sent to Tier 2, so a delivery channel is mandatory.
+            required["N8N_NOTIFY_WEBHOOK_URL+N8N_OUTBOUND_SIGNING_SECRET or SLACK_BOT_TOKEN+SLACK_ESCALATION_CHANNEL"] = None
 
         if self.feature_enabled(Feature.CONTEXT_ENRICHMENT):
             if self.identity_provider is IdentityProviderKind.MICROSOFT_GRAPH:

@@ -11,6 +11,8 @@ TEST_ENV = {
     "VOYAGE_API_KEY": "voyage-key",
     "SLACK_SIGNING_SECRET": "slack-secret",
     "JIRA_WEBHOOK_SECRET": "jira-secret",
+    "SLACK_BOT_TOKEN": "xoxb-test",
+    "SLACK_ESCALATION_CHANNEL": "C-ESCALATIONS",
 }
 os.environ.update(TEST_ENV)
 

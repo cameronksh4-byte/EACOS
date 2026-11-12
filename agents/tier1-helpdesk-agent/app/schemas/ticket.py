@@ -152,6 +152,12 @@ class LLMVisionExtraction(_Strict):
     )
 
 
+class LLMVisionBatch(_Strict):
+    """One entry per screenshot, in the order the images were given."""
+
+    screenshots: List[LLMVisionExtraction]
+
+
 class VisionContext(_Strict):
     images_analyzed: int = Field(..., ge=0)
     images_skipped: int = Field(0, ge=0)
@@ -381,11 +387,17 @@ class AgentTriageResult(_Strict):
 
     @property
     def deflected(self) -> bool:
-        """Resolved by the agent with grounded steps, no human needed."""
+        """Resolved by the agent with grounded steps, no human needed.
+
+        Outage broadcasts are reported separately (outage_tickets), not counted
+        as deflections, so ROI figures stay conservative.
+        """
         return (
             self.scope is ScopeVerdict.IN_SCOPE
             and self.action is TriageAction.RESOLVE
             and not self.requires_tier2_escalation
+            and not self.active_outage_detected
+            and bool(self.cited_sop_ids)
         )
 
 

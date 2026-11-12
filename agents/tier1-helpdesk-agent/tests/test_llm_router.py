@@ -7,7 +7,7 @@ import pytest
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
 from app.schemas.ticket import IncomingTicketWebhook, ScopeVerdict
-from app.services import llm_router
+from app.services import llm_client, llm_router
 from app.services.rag import SopChunk
 
 TICKET = IncomingTicketWebhook(
@@ -63,14 +63,23 @@ def fake_api(monkeypatch):
         api_key="test", max_retries=0,
         http_client=DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)),
     )
-    monkeypatch.setattr(llm_router, "_client", client)
+    monkeypatch.setattr(llm_client, "_client", client)
+
+    async def reserve(*_a, **_k):
+        return "res-1"
+
+    async def settle(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(llm_client, "reserve", reserve)
+    monkeypatch.setattr(llm_client, "settle", settle)
     return calls, responses
 
 
 async def test_confident_haiku_answer_stays_on_haiku(fake_api):
     calls, responses = fake_api
     responses["claude-haiku-5-5"] = message("claude-haiku-5-5", output())
-    decision = await llm_router.route_ticket(TICKET, SOPS)
+    decision = await llm_router.route_ticket(TICKET, SOPS, ledger=llm_client.CostLedger())
     assert decision.model == "claude-haiku-5-5"
     assert len(calls) == 1
     req = calls[0]["body"]
@@ -78,7 +87,7 @@ async def test_confident_haiku_answer_stays_on_haiku(fake_api):
     assert req["output_config"]["effort"] == "medium"
     assert "temperature" not in req and "thinking" not in req
     # Requester text is escaped so it cannot close the <ticket> tag.
-    user = req["messages"][0]["content"]
+    user = req["messages"][0]["content"][0]["text"]
     assert "&lt;/ticket&gt;" in user and user.count("</ticket>") == 1
 
 
@@ -86,7 +95,7 @@ async def test_low_confidence_routes_to_sonnet_with_fallbacks(fake_api):
     calls, responses = fake_api
     responses["claude-haiku-5-5"] = message("claude-haiku-5-5", output(confidence_score=0.6))
     responses["claude-sonnet-5-5"] = message("claude-sonnet-5-5", output(confidence_score=0.9))
-    decision = await llm_router.route_ticket(TICKET, SOPS)
+    decision = await llm_router.route_ticket(TICKET, SOPS, ledger=llm_client.CostLedger())
     assert decision.model == "claude-sonnet-5-5"
     assert calls[1]["body"]["fallbacks"] == "default"
     assert "server-side-fallback-2026-07-01" in calls[1]["beta"]
@@ -98,7 +107,7 @@ async def test_unsure_decline_gets_second_opinion(fake_api):
         "claude-haiku-5-5", output(scope="not_it_support", category="unknown", confidence_score=0.5)
     )
     responses["claude-sonnet-5-5"] = message("claude-sonnet-5-5", output())
-    decision = await llm_router.route_ticket(TICKET, SOPS)
+    decision = await llm_router.route_ticket(TICKET, SOPS, ledger=llm_client.CostLedger())
     assert decision.output.scope is ScopeVerdict.IN_SCOPE
     assert len(calls) == 2
 
@@ -106,14 +115,14 @@ async def test_unsure_decline_gets_second_opinion(fake_api):
 async def test_refusal_becomes_out_of_scope_decline(fake_api):
     _, responses = fake_api
     responses["claude-haiku-5-5"] = message("claude-haiku-5-5", None, stop_reason="refusal")
-    decision = await llm_router.route_ticket(TICKET, SOPS)
+    decision = await llm_router.route_ticket(TICKET, SOPS, ledger=llm_client.CostLedger())
     assert decision.output.scope is ScopeVerdict.NOT_IT_SUPPORT
 
 
 async def test_out_of_range_confidence_is_clamped(fake_api):
     _, responses = fake_api
     responses["claude-haiku-5-5"] = message("claude-haiku-5-5", output(confidence_score=1.7))
-    decision = await llm_router.route_ticket(TICKET, SOPS)
+    decision = await llm_router.route_ticket(TICKET, SOPS, ledger=llm_client.CostLedger())
     assert decision.output.confidence_score == 1.0
 
 
@@ -121,6 +130,7 @@ async def test_truncated_output_everywhere_raises_unavailable(fake_api):
     _, responses = fake_api
     responses["claude-haiku-5-5"] = message("claude-haiku-5-5", None, stop_reason="max_tokens")
     responses["claude-sonnet-5-5"] = message("claude-sonnet-5-5", None, stop_reason="max_tokens")
-    with pytest.raises(llm_router.LLMUnavailableError) as exc:
-        await llm_router.route_ticket(TICKET, SOPS)
-    assert len(exc.value.attempts) == 2
+    ledger = llm_client.CostLedger()
+    with pytest.raises(llm_router.LLMUnavailableError):
+        await llm_router.route_ticket(TICKET, SOPS, ledger=ledger)
+    assert [c.outcome for c in ledger.calls] == ["max_tokens", "max_tokens"]

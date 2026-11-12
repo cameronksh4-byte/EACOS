@@ -229,7 +229,10 @@ create table if not exists public.recent_tickets (
 create index if not exists recent_tickets_window_idx on public.recent_tickets (tenant_id, created_at desc);
 
 -- Tickets from the same tenant in the last p_window_minutes that look alike.
-create or replace function public.match_recent_tickets(
+-- category is the earlier triage result, so a cluster's nature (e.g. a phishing
+-- wave) carries over to tickets that skip the model.
+drop function if exists public.match_recent_tickets(text, vector, int, float, text, int);
+create function public.match_recent_tickets(
     p_tenant_id         text,
     p_query_embedding   vector(1024),
     p_window_minutes    int   default 30,
@@ -240,6 +243,7 @@ create or replace function public.match_recent_tickets(
 returns table (
     ticket_id          text,
     summary            text,
+    category           text,
     parent_incident_id uuid,
     similarity         float,
     created_at         timestamptz
@@ -248,14 +252,14 @@ language sql stable
 set search_path = public, extensions
 as $$
     with window_rows as materialized (
-        select t.ticket_id, t.summary, t.parent_incident_id, t.created_at,
+        select t.ticket_id, t.summary, t.category, t.parent_incident_id, t.created_at,
                1 - (t.embedding <=> p_query_embedding) as similarity
         from public.recent_tickets t
         where t.tenant_id = p_tenant_id
           and t.created_at >= now() - make_interval(mins => greatest(p_window_minutes, 1))
           and (p_exclude_ticket_id is null or t.ticket_id <> p_exclude_ticket_id)
     )
-    select ticket_id, summary, parent_incident_id, similarity, created_at
+    select ticket_id, summary, category, parent_incident_id, similarity, created_at
     from window_rows
     where similarity >= p_min_similarity
     order by similarity desc

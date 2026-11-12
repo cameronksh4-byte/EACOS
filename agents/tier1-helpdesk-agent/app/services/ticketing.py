@@ -134,6 +134,18 @@ async def _slack_user_email(user_id: str) -> str:
     return email or f"{user_id}@slack.invalid"
 
 
+def image_urls(items: Any, *, url_key: str, type_key: str, limit: int = 10) -> list[str]:
+    """https image URLs from a platform's attachment list (vision fetches them safely)."""
+    urls: list[str] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        url, kind = item.get(url_key), str(item.get(type_key) or "")
+        if isinstance(url, str) and url.startswith("https://") and kind.startswith("image/"):
+            urls.append(url)
+    return urls[:limit]
+
+
 def slack_event_to_ticket(event: dict[str, Any]) -> tuple[str, str, str] | None:
     """Return (channel, thread_ts, text) for events we should answer, else None."""
     if event.get("bot_id") or event.get("subtype"):
@@ -156,10 +168,12 @@ async def handle_slack_event(event: dict[str, Any]) -> None:
     ticket = IncomingTicketWebhook(
         tenant_id=settings.tenant_id,
         ticket_id=f"SLK-{channel}-{thread_ts}",
+        thread_id=f"slack:{channel}:{thread_ts}",
         reporter_email=await _slack_user_email(event.get("user", "unknown")),
         subject=text.splitlines()[0][:200],
         body=text,
         source_system="slack",
+        attachment_urls=image_urls(event.get("files"), url_key="url_private", type_key="mimetype"),
     )
     result = await process_ticket(ticket)
     await _slack_api("chat.postMessage", {"channel": channel, "thread_ts": thread_ts, "text": result.draft_user_reply})
@@ -244,6 +258,7 @@ def jira_issue_to_ticket(issue: dict[str, Any]) -> IncomingTicketWebhook:
         subject=(fields.get("summary") or "(no summary)")[:1000],
         body=_adf_text(fields.get("description")).strip() or "(no description)",
         source_system="jira",
+        attachment_urls=image_urls(fields.get("attachment"), url_key="content", type_key="mimeType"),
     )
 
 

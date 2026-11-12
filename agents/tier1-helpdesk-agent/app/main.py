@@ -1,79 +1,112 @@
-"""FastAPI entrypoint and webhook routes."""
+"""FastAPI entrypoint and routes.
+
+Tier 0 (always available, kill-switchable):
+    GET  /health
+    POST /v1/triage                               x-webhook-secret
+    GET  /v1/telemetry/{tenant_id}/roi-summary    x-webhook-secret, ROI_TELEMETRY
+    POST /webhooks/slack | /webhooks/teams | /webhooks/jira   platform signatures
+
+Tier 1 and Tier 2 routes are added in Phase 3 behind `require_feature`.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
-from contextlib import asynccontextmanager
-from typing import Any
+from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from app.config import get_settings
-from app.schemas.ticket import AgentTriageResult, IncomingTicketWebhook
-from app.services import llm_router, rag, supabase_client, ticketing
+from app.config import Feature, get_settings
+from app.gating import require_feature, require_tenant, require_webhook_secret
+from app.schemas.ticket import AgentTriageResult, IncomingTicketWebhook, ROISummary
+from app.services import (
+    background,
+    llm_client,
+    notifier,
+    outage,
+    rag,
+    supabase_client,
+    telemetry,
+    ticketing,
+    vision,
+)
 from app.services.pipeline import process_ticket
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("tier1_agent")
 
 TEAMS_SYNC_REPLY_SECONDS = 4.5  # Teams outgoing webhooks time out at 5s
-_background: set[asyncio.Task[Any]] = set()
+NOTIFICATION_RETRY_SECONDS = 60
+
+
+async def _notification_retry_loop() -> None:
+    """Keep retrying owed Tier 2 notifications (guardrail #2 exemption controls)."""
+    while True:
+        await asyncio.sleep(NOTIFICATION_RETRY_SECONDS)
+        if get_settings().feature_enabled(Feature.OUTAGE_DETECTION):
+            try:
+                delivered = await outage.retry_pending_notifications()
+                if delivered:
+                    logger.info("delivered %d pending outage notifications", delivered)
+            except Exception:  # noqa: BLE001
+                logger.exception("outage notification retry failed")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    missing = get_settings().missing_core_settings()
+    settings = get_settings()
+    missing = settings.missing_core_settings()
     if missing:
         raise RuntimeError(f"missing required settings: {', '.join(missing)}")
+    logger.info(
+        "starting tier=%s features=%s tenants=%s provider=%s",
+        settings.service_tier.value, [f.value for f in settings.enabled_features()],
+        settings.allowed_tenant_ids, settings.llm_provider.value,
+    )
+    retry_task = asyncio.create_task(_notification_retry_loop(), name="notification-retry")
     yield
-    for close in (llm_router.aclose, rag.aclose, supabase_client.aclose, ticketing.aclose):
+    retry_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await retry_task
+    await background.drain()
+    for close in (llm_client.aclose, rag.aclose, supabase_client.aclose, ticketing.aclose,
+                  vision.aclose, notifier.aclose):
         await close()
 
 
-app = FastAPI(title="Tier 1 IT Help Desk Agent", version="1.0.0", lifespan=lifespan)
-
-
-def _require_secret(provided: str) -> None:
-    expected = get_settings().webhook_secret.get_secret_value()
-    if not expected or not hmac.compare_digest(provided.encode(), expected.encode()):
-        raise HTTPException(status_code=401, detail="invalid webhook secret")
-
-
-def _require_tenant(tenant_id: str) -> None:
-    if not get_settings().is_tenant_allowed(tenant_id):
-        raise HTTPException(status_code=403, detail="tenant not served by this deployment")
-
-
-def _spawn(coro: Any, label: str) -> None:
-    """Run work after the HTTP response, logging (not losing) failures."""
-
-    async def runner() -> None:
-        try:
-            await coro
-        except Exception:  # noqa: BLE001
-            logger.exception("background task failed: %s", label)
-
-    task = asyncio.create_task(runner())
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+app = FastAPI(title="Tier 1 IT Help Desk Agent", version="2.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "tier": get_settings().service_tier.value}
 
 
-@app.post("/v1/triage", response_model=AgentTriageResult)
-async def triage_ticket(payload: IncomingTicketWebhook, x_webhook_secret: str = Header(...)):
-    _require_secret(x_webhook_secret)
-    _require_tenant(payload.tenant_id)
-    # RAG -> Haiku/Sonnet routing -> deterministic guardrails (scope declines,
-    # citation checks, forced escalation for security / low confidence).
+@app.post(
+    "/v1/triage",
+    response_model=AgentTriageResult,
+    dependencies=[Depends(require_webhook_secret), Depends(require_feature(Feature.TRIAGE_AND_DRAFT))],
+)
+async def triage_ticket(payload: IncomingTicketWebhook):
+    require_tenant(payload.tenant_id)
     return await process_ticket(payload)
+
+
+@app.get(
+    "/v1/telemetry/{tenant_id}/roi-summary",
+    response_model=ROISummary,
+    dependencies=[Depends(require_webhook_secret), Depends(require_feature(Feature.ROI_TELEMETRY))],
+)
+async def roi_summary(tenant_id: str, days: int = Query(30, ge=1, le=365)):
+    require_tenant(tenant_id)
+    try:
+        return await telemetry.roi_summary(tenant_id, days=days)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("roi summary failed tenant=%s", tenant_id)
+        raise HTTPException(status_code=503, detail="telemetry store unavailable") from exc
 
 
 @app.post("/webhooks/slack")
@@ -98,7 +131,7 @@ async def slack_events(request: Request):
         event_id = data.get("event_id", "")
         if event_id and ticketing.seen_events.check_and_add(f"slack:{event_id}"):
             return {"ok": True}
-        _spawn(ticketing.handle_slack_event(data.get("event", {})), f"slack {event_id}")
+        background.spawn(ticketing.handle_slack_event(data.get("event", {})), f"slack {event_id}")
     return {"ok": True}
 
 
@@ -123,10 +156,8 @@ async def teams_outgoing_webhook(request: Request):
         result = await task
         await ticketing.post_teams_followup(result.draft_user_reply)
 
-    _spawn(follow_up(), f"teams {ticket.ticket_id}")
-    return JSONResponse(
-        {"type": "message", "text": "Thanks! I'm looking into this and will reply here in a moment."}
-    )
+    background.spawn(follow_up(), f"teams {ticket.ticket_id}")
+    return JSONResponse({"type": "message", "text": "Thanks! I'm looking into this and will reply here in a moment."})
 
 
 @app.post("/webhooks/jira")
@@ -146,5 +177,5 @@ async def jira_webhook(request: Request):
     key = data["issue"].get("key", "")
     if ticketing.seen_events.check_and_add(f"jira:{key}"):
         return {"ok": True}
-    _spawn(ticketing.handle_jira_issue(data["issue"]), f"jira {key}")
+    background.spawn(ticketing.handle_jira_issue(data["issue"]), f"jira {key}")
     return {"ok": True}
