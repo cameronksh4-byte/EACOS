@@ -300,8 +300,12 @@ def env(monkeypatch):
 
     notified: list[dict] = []
 
-    async def fake_notify(event, tenant_id, payload, text):
-        notified.append({"event": event, "payload": payload, "text": text})
+    n8n_up = {"value": True}
+
+    async def fake_notify(event, tenant_id, payload, text, *, require_n8n=False):
+        if require_n8n and not n8n_up["value"]:
+            return False
+        notified.append({"event": event, "payload": payload, "text": text, "require_n8n": require_n8n})
         return True
 
     monkeypatch.setattr(notifier, "notify_tier2", fake_notify)
@@ -311,4 +315,4 @@ def env(monkeypatch):
 
     sb.sops = [{"doc_id": "SOP-NET-001", "title": "VPN", "system_name": "GlobalProtect", "os_platform": "any",
                 "content": "1. Disconnect and reconnect", "similarity": 0.81}]
-    return {"sb": sb, "claude": claude, "embedded": embedded, "notified": notified, "n8n": n8n}
+    return {"sb": sb, "claude": claude, "embedded": embedded, "notified": notified, "n8n": n8n, "n8n_up": n8n_up}

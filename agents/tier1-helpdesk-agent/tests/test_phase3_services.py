@@ -709,3 +709,40 @@ async def test_maintenance_tick_runs_housekeeping_and_delivers_escalations(env, 
     assert ("run_housekeeping", {}) in env["sb"].rpc_calls
     assert env["notified"][-1]["payload"]["reason"] == "approval_expired"
     assert env["sb"].t("conversation_threads")[0]["escalation_notified_at"] is not None
+
+
+# =============================================================================
+# Local n8n resilience: SOP-draft review notices survive n8n being offline
+# =============================================================================
+
+
+async def test_draft_review_notice_is_retried_until_n8n_accepts(env, tier2):
+    escalated_telemetry(env["sb"])
+    env["sb"].sops = []
+    env["n8n_up"]["value"] = False  # e.g. the laptop running n8n is asleep
+    outcome = await flywheel.process_resolved_ticket(resolved())
+    draft = env["sb"].t("sop_drafts")[0]
+    assert outcome.draft_created and draft.get("review_notified_at") is None
+    assert not [n for n in env["notified"] if n["event"] == "sop_draft.created"]
+
+    assert await flywheel.retry_pending_reviews() == 0  # still down
+    env["n8n_up"]["value"] = True
+    assert await flywheel.retry_pending_reviews() == 1
+    assert env["sb"].t("sop_drafts")[0]["review_notified_at"] is not None
+    sent = [n for n in env["notified"] if n["event"] == "sop_draft.created"]
+    assert len(sent) == 1 and sent[0]["require_n8n"] is True and sent[0]["payload"]["doc_id"] == outcome.doc_id
+    assert await flywheel.retry_pending_reviews() == 0  # not re-sent once delivered
+
+
+async def test_maintenance_tick_retries_draft_reviews_at_tier2(env, tier2):
+    from app.main import maintenance_tick
+
+    env["sb"].t("sop_drafts").append({"draft_id": str(uuid.uuid4()), "tenant_id": "acme-corp",
+                                      "status": "draft_pending_review", "doc_id": "SOP-X-1", "title": "X",
+                                      "markdown": "# X", "source_ticket_id": "T-1", "review_notified_at": None})
+    await maintenance_tick(run_housekeeping=False)
+    assert env["sb"].t("sop_drafts")[0]["review_notified_at"] is not None
+
+
+async def test_draft_retry_is_a_no_op_below_tier2(env, tier1):
+    assert await flywheel.retry_pending_reviews() == 0

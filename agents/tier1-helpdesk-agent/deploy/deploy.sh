@@ -121,6 +121,13 @@ fi
 OVERRIDE_TAG="$(cfg IMAGE_TAG)"; [[ -n "$OVERRIDE_TAG" ]] && TAG="$OVERRIDE_TAG"
 "$PY" "$HERE/render_config.py" "$ENV_FILE" --image-tag "$TAG" --out "$TFVARS"
 
+# n8n's environment, derived from the same file so the shared secrets always match.
+N8N_ENV_OUT="${ENV_FILE%.env}.n8n.env"
+if [[ "$TIER" != "TIER_0_INCENTIVE" || -n "$(cfg N8N_NOTIFY_WEBHOOK_URL)" ]]; then
+  "$PY" "$HERE/render_config.py" "$ENV_FILE" --n8n-env "$N8N_ENV_OUT"
+  note "n8n environment: $N8N_ENV_OUT (load it into your n8n and restart n8n; see integrations/n8n/LOCAL_N8N.md)"
+fi
+
 # ---------------------------------------------------------------------------
 bold "2/8 Terraform state"
 # ---------------------------------------------------------------------------
@@ -243,9 +250,16 @@ if [[ ${#loader_args[@]} -gt 0 ]]; then
   ( cd "$ROOT" && "$PY" -m ingest.load_tenant_data --tenant "$CLIENT" ${loader_args[@]+"${loader_args[@]}"} )
 fi
 if [[ -n "$(cfg N8N_API_URL)" && -n "$(cfg N8N_API_KEY)" ]]; then
+  # Runs from this machine, so a local n8n works here (e.g. N8N_API_URL=http://localhost:5678).
   N8N_API_URL="$(cfg N8N_API_URL)" N8N_API_KEY="$(cfg N8N_API_KEY)" "$PY" "$ROOT/integrations/n8n/deploy_workflows.py"
-else
-  [[ "$TIER" != "TIER_0_INCENTIVE" ]] && note "n8n API not configured: import integrations/n8n/workflows/*.json by hand (see integrations/n8n/README.md)"
+elif [[ "$TIER" != "TIER_0_INCENTIVE" ]]; then
+  note "n8n API not configured: import integrations/n8n/workflows/*.json by hand (see integrations/n8n/README.md)"
+fi
+if [[ -n "$(cfg N8N_APPROVAL_WEBHOOK_URL)" || -n "$(cfg N8N_NOTIFY_WEBHOOK_URL)" ]]; then
+  # Through the public URLs the agent in AWS uses: proves the tunnel and the shared secret.
+  "$PY" "$HERE/n8n_ping.py" "$ENV_FILE" || die "the agent can't deliver to n8n yet. Load $N8N_ENV_OUT into n8n,
+       restart it, make sure the workflows are published and the tunnel is up (integrations/n8n/LOCAL_N8N.md),
+       then re-run this command"
 fi
 
 # ---------------------------------------------------------------------------

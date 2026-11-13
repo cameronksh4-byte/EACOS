@@ -510,11 +510,18 @@ create table if not exists public.sop_drafts (
     reviewed_by        text,
     reviewed_at        timestamptz,
     ingested_at        timestamptz,
+    -- Set once the review notice reached n8n; the agent retries while null.
+    review_notified_at timestamptz,
     created_at         timestamptz not null default now(),
     unique (tenant_id, source_ticket_id),
     unique (tenant_id, doc_id),
     check (frontmatter ? 'doc_id' and frontmatter ->> 'doc_id' = doc_id)
 );
+
+alter table public.sop_drafts add column if not exists review_notified_at timestamptz;
+
+create index if not exists sop_drafts_unnotified_idx
+    on public.sop_drafts (tenant_id, created_at) where status = 'draft_pending_review' and review_notified_at is null;
 
 create index if not exists sop_drafts_review_idx
     on public.sop_drafts (tenant_id, created_at desc) where status = 'draft_pending_review';

@@ -24,7 +24,7 @@ NS = uuid.UUID("6f1c3b0e-6b1f-4a8e-9a43-1d2f7e0c5a10")
 WEBHOOK = ("n8n-nodes-base.webhook", 2.2)
 RESPOND = ("n8n-nodes-base.respondToWebhook", 1.5)
 CODE = ("n8n-nodes-base.code", 2)
-SCHEDULE = ("n8n-nodes-base.scheduleTrigger", 1.2)
+SCHEDULE = ("n8n-nodes-base.scheduleTrigger", 1.4)
 MANUAL = ("n8n-nodes-base.manualTrigger", 1)
 
 
@@ -88,6 +88,8 @@ def schedule_workflow() -> dict:
     nodes = [
         node(name, "Every Monday 08:00", SCHEDULE, [0, 0], {
             "rule": {"interval": [{"field": "cronExpression", "expression": "0 8 * * 1"}]},
+            # A local n8n may be off at 08:00 Monday: run the missed report once it's back.
+            "misfirePolicy": "coalesce",
         }),
         # Lets operators (and `n8n execute`) send the reports on demand.
         node(name, "Run now", MANUAL, [0, 200], {}),

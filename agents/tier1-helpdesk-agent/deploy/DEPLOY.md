@@ -100,8 +100,10 @@ python3 deploy/render_config.py deploy/acme-corp.env --check
 
 | For | Also fill in |
 |---|---|
-| Tier 1 (`TIER_1_PRODUCTION`) | Section 4: `N8N_APPROVAL_WEBHOOK_URL`, `N8N_NOTIFY_WEBHOOK_URL`, the two `N8N_*_SECRET`s, `IDENTITY_PROVIDER` (+ Graph/Okta values), `CATALOG_CSV` (start from `ingest/sample_catalog.csv`) |
-| Tier 2 (`TIER_2_MANAGED_OPS`) | Same as Tier 1. `N8N_NOTIFY_WEBHOOK_URL` is required |
+| Tier 1 (`TIER_1_PRODUCTION`) | Section 4: `N8N_PUBLIC_URL` (your n8n's public webhook base; see `integrations/n8n/LOCAL_N8N.md` for a local n8n), the two `N8N_*_SECRET`s, `IDENTITY_PROVIDER` (+ Graph/Okta values), `CATALOG_CSV` (start from `ingest/sample_catalog.csv`) |
+| Tier 2 (`TIER_2_MANAGED_OPS`) | Same as Tier 1, plus `N8N_SLACK_SOP_REVIEW_CHANNEL` and `N8N_SLACK_EXEC_CHANNEL` |
+
+`localhost` or private-network n8n URLs are rejected at `--check`, because the agent in AWS can't reach them.
 
 ## 4. Deploy
 
@@ -137,10 +139,14 @@ token → `TEAMS_OUTGOING_WEBHOOK_SECRET`). Jira Cloud webhook on *Issue created
 `https://<host>/webhooks/jira` with a secret (`JIRA_WEBHOOK_SECRET`), plus `JIRA_BASE_URL`,
 `JIRA_EMAIL`, `JIRA_API_TOKEN`. Re-run the deploy after adding them.
 
-**n8n (Tier 1 and 2):** follow `integrations/n8n/README.md`. Set the listed environment variables
-on n8n (the secrets must match `deploy/<client>.env`), then let the deploy script import the
-workflows (`N8N_API_URL` + `N8N_API_KEY`) or import the 4 JSON files by hand and publish them.
-Point the Slack app's *Interactivity* URL at `https://<n8n>/webhook/helpdesk-slack-actions`.
+**n8n (Tier 1 and 2):** for an n8n on your own machine, follow
+[`integrations/n8n/LOCAL_N8N.md`](../integrations/n8n/LOCAL_N8N.md). It covers a tunnel that exposes
+only `/webhook/*`, setting `N8N_PUBLIC_URL`, and loading the generated `deploy/<client>.n8n.env`
+into n8n before restarting it. For a hosted n8n, see `integrations/n8n/README.md`. Either way the
+deploy script imports and publishes the workflows when `N8N_API_URL` + `N8N_API_KEY` are set
+(`http://localhost:5678` works for a local n8n), then pings both webhooks through the public URL
+to prove the tunnel and the shared secret. Point the Slack app's *Interactivity* URL at
+`https://<N8N_PUBLIC_URL host>/webhook/helpdesk-slack-actions`.
 
 **Alarms:** if `ALARM_EMAIL` is set, confirm the subscription email AWS sends.
 
@@ -171,3 +177,4 @@ Point the Slack app's *Interactivity* URL at `https://<n8n>/webhook/helpdesk-sla
 | `Secrets Manager … scheduled for deletion` after a destroy | Secrets are kept 7 days. `aws secretsmanager restore-secret --secret-id <client>-tier1-agent/runtime`, or delete it with `--force-delete-without-recovery` |
 | Slack: "Your URL didn't respond" | DNS not propagated yet, or `SLACK_SIGNING_SECRET` not deployed. Re-run the deploy after setting it |
 | Approval clicks say "already decided or expired" | Expected after a decision or after 72 h. A wrong approver also gets this message |
+| `n8n_ping` FAIL: HTTP 401 / 404 / not reachable | 401: reload `deploy/<client>.n8n.env` into n8n and restart it. 404: publish the workflows. Not reachable: n8n or the tunnel is down (`integrations/n8n/LOCAL_N8N.md`) |

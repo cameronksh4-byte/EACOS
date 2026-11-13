@@ -5,7 +5,7 @@
       "id": "226a3c7c-5cd5-5c2f-90cb-f2c86d14cdb1",
       "name": "Every Monday 08:00",
       "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.2,
+      "typeVersion": 1.4,
       "position": [
         0,
         0
@@ -18,7 +18,8 @@
               "expression": "0 8 * * 1"
             }
           ]
-        }
+        },
+        "misfirePolicy": "coalesce"
       }
     },
     {

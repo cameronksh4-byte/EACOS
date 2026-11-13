@@ -298,3 +298,125 @@ def test_destroy_without_a_deployment_stops(stubbed):
     proc, calls, _ = stubbed({**TIER0, "SOP_DIR": ""}, "--destroy", extra_env={"DEPLOY_DESTROY_CONFIRM": "acme-corp"})
     assert proc.returncode != 0 and "nothing deployed to destroy" in proc.stderr
     assert not any("create-bucket" in a or "plan" in a for _, a in calls)
+
+
+# =============================================================================
+# Local n8n: public-URL checks, derived webhook URLs, generated n8n environment, ping
+# =============================================================================
+
+TIER1_LOCAL_N8N = {**TIER0, "SERVICE_TIER": "TIER_1_PRODUCTION", "N8N_PUBLIC_URL": "https://n8n-hooks.acme.com",
+                   "N8N_OUTBOUND_SIGNING_SECRET": "o" * 40, "N8N_CALLBACK_SECRET": "c" * 40,
+                   "SLACK_SIGNING_SECRET": "slack-signing-SECRET", "N8N_API_URL": "http://localhost:5678"}
+
+
+def test_public_n8n_url_derives_both_webhooks_and_validates():
+    assert render_config.validate(dict(TIER1_LOCAL_N8N)) == []
+    eff = render_config.effective(TIER1_LOCAL_N8N)
+    assert eff["N8N_APPROVAL_WEBHOOK_URL"] == "https://n8n-hooks.acme.com/webhook/helpdesk-approvals"
+    assert eff["N8N_NOTIFY_WEBHOOK_URL"] == "https://n8n-hooks.acme.com/webhook/helpdesk-notify"
+    out = render_config.render(TIER1_LOCAL_N8N, "t")
+    assert out["extra_environment"]["N8N_APPROVAL_WEBHOOK_URL"].endswith("/webhook/helpdesk-approvals")
+    assert "N8N_API_URL" not in out["extra_environment"]  # deploy-machine only, never sent to AWS
+
+
+def test_tier0_with_n8n_only_derives_the_notify_webhook():
+    eff = render_config.effective({**TIER0, "N8N_PUBLIC_URL": "https://n8n-hooks.acme.com"})
+    assert eff["N8N_APPROVAL_WEBHOOK_URL"] == "" and eff["N8N_NOTIFY_WEBHOOK_URL"].endswith("/helpdesk-notify")
+
+
+@pytest.mark.parametrize("url", ["http://localhost:5678", "https://localhost:5678", "https://192.168.1.20",
+                                 "https://n8n.local", "https://10.0.0.5:5678", "http://n8n-hooks.acme.com", "https://n8n"])
+def test_n8n_urls_aws_cannot_reach_are_rejected(url):
+    problems = render_config.validate({**TIER1_LOCAL_N8N, "N8N_PUBLIC_URL": url})
+    assert any("N8N_PUBLIC_URL" in p and ("reach" in p) for p in problems), problems
+
+
+def test_local_api_url_is_fine_because_it_is_used_from_this_machine():
+    assert render_config.validate({**TIER1_LOCAL_N8N, "N8N_API_URL": "http://127.0.0.1:5678"}) == []
+
+
+def test_generated_n8n_env_covers_everything_the_workflows_read():
+    import re as _re
+
+    env = render_config.n8n_environment({**TIER1_LOCAL_N8N, "N8N_PROVISIONING_PROVIDER": "entra",
+                                         "GRAPH_TENANT_ID": "tid", "GRAPH_CLIENT_ID": "cid",
+                                         "GRAPH_CLIENT_SECRET": "graph-SECRET"})
+    src = "\n".join(p.read_text() for p in (ROOT / "integrations" / "n8n" / "src").glob("*.js"))
+    required = set(_re.findall(r"env\('([A-Z0-9_]+)'\)", src))  # env('X') with no fallback
+    required -= {"OKTA_DOMAIN", "OKTA_API_TOKEN"}               # only for PROVISIONING_PROVIDER=okta
+    missing = {k for k in required if not env.get(k)}
+    assert not missing, missing
+    assert env["N8N_BLOCK_ENV_ACCESS_IN_NODE"] == "false" and env["NODE_FUNCTION_ALLOW_BUILTIN"] == "crypto"
+    # Shared secrets are the deploy file's, so they can't drift.
+    assert env["N8N_AGENT_SIGNING_SECRET"] == TIER1_LOCAL_N8N["N8N_OUTBOUND_SIGNING_SECRET"]
+    assert env["N8N_CALLBACK_SECRET"] == TIER1_LOCAL_N8N["N8N_CALLBACK_SECRET"]
+    assert env["AGENT_WEBHOOK_SECRET"] == TIER1_LOCAL_N8N["WEBHOOK_SECRET"]
+    assert env["AGENT_BASE_URL"] == "https://helpdesk.acme.com" and env["WEBHOOK_URL"] == "https://n8n-hooks.acme.com/"
+    assert env["SLACK_ALERT_CHANNEL"] == env["SLACK_SOP_REVIEW_CHANNEL"] == "C-ESC"
+    assert render_config.n8n_env_problems(env) == []
+
+
+def test_provisioning_provider_follows_identity_provider():
+    assert render_config.n8n_environment({**TIER1_LOCAL_N8N, "IDENTITY_PROVIDER": "okta"})["PROVISIONING_PROVIDER"] == "okta"
+    env = render_config.n8n_environment(dict(TIER1_LOCAL_N8N))
+    assert env["PROVISIONING_PROVIDER"] == "none" and "GRAPH_CLIENT_SECRET" not in env
+
+
+def test_n8n_env_file_is_private_and_warns_on_gaps(tmp_path, capsys):
+    cfg = write_env(tmp_path / "c.env", {**TIER1_LOCAL_N8N, "SLACK_SIGNING_SECRET": ""})
+    out = tmp_path / "c.n8n.env"
+    assert render_config.main([str(cfg), "--n8n-env", str(out)]) == 0
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    parsed = render_config.parse_env_file(out)
+    assert parsed["N8N_AGENT_SIGNING_SECRET"] == "o" * 40
+    assert "SLACK_SIGNING_SECRET" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "status, expected",
+    [(200, "signature accepted"), (401, "N8N_AGENT_SIGNING_SECRET"), (404, "publish"), (403, "tunnel")],
+)
+def test_n8n_ping_explains_each_failure(monkeypatch, status, expected):
+    import httpx
+
+    import n8n_ping
+
+    seen = {}
+
+    def fake_post(url, content, timeout, headers):
+        seen["sig"], seen["body"] = headers["X-Agent-Signature"], content
+        return httpx.Response(status, text="x")
+
+    monkeypatch.setattr(n8n_ping.httpx, "post", fake_post)
+    ok, detail = n8n_ping.ping("https://n8n-hooks.acme.com/webhook/helpdesk-notify", "s" * 40)
+    assert ok == (status == 200) and expected in detail
+    from app.services import signing
+
+    assert signing.verify("s" * 40, seen["body"], seen["sig"], 300)
+    assert json.loads(seen["body"])["event"] == "deploy.ping"
+
+
+def test_n8n_ping_unreachable_and_http_refused(monkeypatch):
+    import httpx
+
+    import n8n_ping
+
+    def down(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(n8n_ping.httpx, "post", down)
+    ok, detail = n8n_ping.ping("https://n8n-hooks.acme.com/webhook/x", "s")
+    assert not ok and "tunnel" in detail
+    ok, detail = n8n_ping.ping("http://n8n-hooks.acme.com/webhook/x", "s")
+    assert not ok and "https" in detail
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_deploy_writes_the_n8n_env_file_next_to_the_config(stubbed):
+    stubbed({**TIER0, "SOP_DIR": ""}, "--yes", "--skip-smoke")  # create state bucket
+    proc, _, _ = stubbed({**TIER1_LOCAL_N8N, "SOP_DIR": ""}, "--plan")
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    n8n_env = Path(proc.args[2]).with_name("client.n8n.env")
+    assert n8n_env.exists() and stat.S_IMODE(n8n_env.stat().st_mode) == 0o600
+    assert "N8N_AGENT_SIGNING_SECRET=" + "o" * 40 in n8n_env.read_text()
+    assert "o" * 40 not in proc.stdout + proc.stderr  # never printed

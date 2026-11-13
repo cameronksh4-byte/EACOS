@@ -445,3 +445,20 @@ async def test_retry_sweep_delivers_owed_outage_notifications(env, monkeypatch):
     monkeypatch.setattr(supabase_client, "select", pending)
     assert await outage.retry_pending_notifications() == 1
     assert env["sb"].marked == [incident] and env["notified"][0]["payload"]["ticket_count"] == 7
+
+
+async def test_require_n8n_skips_the_slack_fallback(monkeypatch):
+    monkeypatch.setenv("N8N_NOTIFY_WEBHOOK_URL", "https://n8n.example.com/hook")
+    monkeypatch.setenv("N8N_OUTBOUND_SIGNING_SECRET", "n8n-secret")
+    get_settings.cache_clear()
+    hosts = []
+
+    def handler(req):
+        hosts.append(req.url.host)
+        return httpx.Response(503 if req.url.host == "n8n.example.com" else 200, json={"ok": True})
+
+    monkeypatch.setattr(notifier, "_http", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await notifier.notify_tier2("sop_draft.created", "acme-corp", {}, "t", require_n8n=True) is False
+    assert hosts == ["n8n.example.com"]  # Slack never tried: its fallback has no review buttons
+    assert await notifier.notify_tier2("outage.detected", "acme-corp", {}, "t") is True
+    assert hosts[-1] == "slack.com"  # ordinary alerts still fall back to Slack

@@ -53,8 +53,11 @@ Deployment details:
    I've approved. Report each of the 8 steps as it completes. If the smoke test fails, gather
    `aws logs tail /ecs/<client-slug>-tier1-agent --since 15m` and diagnose using DEPLOY.md section 7.
 5. **Integrations.** Walk me through DEPLOY.md section 5 for this tier, one step at a time:
-   verifying the Slack Event Subscriptions URL (Retry) now that the agent is live. For Tier 1+, also n8n: list the n8n environment variables I must set and
-   which env-file values they must match, by name only.
+   verifying the Slack Event Subscriptions URL (Retry) now that the agent is live. For Tier 1+, I run
+   n8n locally: follow `integrations/n8n/LOCAL_N8N.md`. Help me set up a tunnel that exposes only
+   `/webhook/*` (check that `/` returns 404 publicly), have me load the generated
+   `deploy/<client-slug>.n8n.env` into my n8n and restart it (don't display its contents), and run
+   `python3 deploy/n8n_ping.py deploy/<client-slug>.env` until both checks pass.
 6. **Final check.** Run the smoke test again
    (`python3 deploy/smoke_test.py --host <hostname> --tenant <client-slug> --tier <tier> --secret "$(python3 deploy/render_config.py deploy/<client-slug>.env --get WEBHOOK_SECRET)"`),
    then ask me to DM the Slack bot "my VPN says portal not found" and confirm it answers with

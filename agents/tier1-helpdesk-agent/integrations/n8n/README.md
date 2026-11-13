@@ -16,6 +16,10 @@ from the button, and the agent only accepts a decision from the designated appro
 
 ## Install
 
+> **Running n8n on your own machine?** Follow [`LOCAL_N8N.md`](LOCAL_N8N.md). The agent in AWS
+> and Slack both need a public HTTPS route to n8n's `/webhook/*` paths, and the deploy kit
+> generates n8n's environment file for you.
+
 1. **Import**: in n8n, *Workflows → Import from File* for each JSON in `workflows/`, then
    *Publish* each one. Or let the deploy script do it through the n8n API:
    `N8N_API_URL=… N8N_API_KEY=… python integrations/n8n/deploy_workflows.py`
@@ -55,6 +59,6 @@ node --test integrations/n8n/test/handlers.test.js
 N8N_BIN=…/node_modules/n8n/bin/n8n NODE_BIN=…/node python integrations/n8n/test/e2e_n8n.py
 ```
 
-The end-to-end run was last verified on n8n 2.47.5: 9 checks covering card delivery,
+The end-to-end run was last verified on n8n 2.47.5: 11 checks covering the deploy ping, card delivery,
 signature rejection in both directions, approve/ingest clicks producing callbacks the agent
 accepts, notification routing, and weekly reports per tenant.

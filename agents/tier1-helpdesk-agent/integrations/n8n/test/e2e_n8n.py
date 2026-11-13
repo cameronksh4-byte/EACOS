@@ -300,7 +300,30 @@ def main() -> int:
             assert tenants == ["acme-corp", "globex"], tenants
             assert all(c["headers"]["x-webhook-secret"] == SECRETS["webhook"] for c in calls("/v1/reports/weekly"))
 
+        def deploy_ping_checks_secret_and_reachability():
+            sys.path.insert(0, str(ROOT / "deploy"))
+            import n8n_ping
+
+            Mock.calls.clear()
+            for path in ("helpdesk-approvals", "helpdesk-notify"):
+                ok, detail = n8n_ping.ping(f"{base}/{path}", SECRETS["out"], allow_http=True)
+                assert ok, f"{path}: {detail}"
+                ok, detail = n8n_ping.ping(f"{base}/{path}", "wrong-secret", allow_http=True)
+                assert not ok and "N8N_AGENT_SIGNING_SECRET" in detail, detail
+            ok, detail = n8n_ping.ping(f"{base}/not-a-workflow", SECRETS["out"], allow_http=True)
+            assert not ok and "publish" in detail, detail
+            time.sleep(2)
+            assert not calls("/slack/chat.postMessage"), "a ping posted to Slack"
+
+        def schedule_has_missed_run_policy():
+            exported = subprocess.run([*n8n, "export:workflow", "--all"], env={**env, "N8N_RUNNERS_BROKER_PORT":
+                                      str(N8N_PORT + 3)}, capture_output=True, text=True, timeout=300).stdout
+            assert '"misfirePolicy": "coalesce"' in exported or '"misfirePolicy":"coalesce"' in exported, \
+                "schedule trigger lost its missed-run policy on import"
+
         for name, fn in [
+            ("deploy ping: reachable + secret match, mismatch and unpublished explained", deploy_ping_checks_secret_and_reachability),
+            ("weekly schedule keeps its missed-run (coalesce) policy", schedule_has_missed_run_policy),
             ("agent approval.requested -> approver DM with signed-nonce buttons", approval_card),
             ("unsigned agent webhook -> 401, no side effects", bad_agent_signature),
             ("provisioning with no provider -> manual-provisioning alert", provisioning_without_provider_alerts),

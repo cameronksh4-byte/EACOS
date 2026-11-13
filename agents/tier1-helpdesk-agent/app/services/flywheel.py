@@ -210,16 +210,51 @@ async def process_resolved_ticket(event: TicketResolvedWebhook) -> FlywheelOutco
         "nearest_similarity": draft.nearest_similarity,
     })
     draft_id = UUID(row["draft_id"])
-    await notifier.notify_tier2(
-        "sop_draft.created", event.tenant_id,
-        {"draft_id": str(draft_id), "doc_id": front.doc_id, "title": front.title, "markdown": draft.markdown,
-         "source_ticket_id": tid, "redactions": sorted(set(synth.redactions_made) | set(scrubbed)),
-         "decision_callback": "/v1/callbacks/sop-draft"},
-        f"New SOP draft for review: {front.title} ({front.doc_id}), from ticket {tid}.",
-    )
+    await notify_reviewer(event.tenant_id, {
+        "draft_id": str(draft_id), "doc_id": front.doc_id, "title": front.title, "markdown": draft.markdown,
+        "source_ticket_id": tid, "redactions": sorted(set(synth.redactions_made) | set(scrubbed)),
+    })
     logger.info("flywheel draft created ticket=%s doc_id=%s", tid, front.doc_id)
     return FlywheelOutcome(ticket_id=tid, draft_created=True, draft_id=draft_id, doc_id=front.doc_id,
                            reason="knowledge gap: draft pending review")
+
+
+async def notify_reviewer(tenant_id: str, draft: dict) -> bool:
+    """Send a draft to the IT manager via n8n (which renders [Ingest]/[Reject]).
+
+    Delivery is recorded, and the maintenance loop retries until it succeeds, so
+    a draft is never stranded while n8n is offline (e.g. a local n8n that's asleep).
+    """
+    delivered = await notifier.notify_tier2(
+        "sop_draft.created", tenant_id,
+        {**draft, "decision_callback": "/v1/callbacks/sop-draft"},
+        f"New SOP draft for review: {draft['title']} ({draft['doc_id']}), from ticket {draft['source_ticket_id']}.",
+        require_n8n=True,
+    )
+    if delivered:
+        await supabase_client.update(
+            "sop_drafts",
+            {"tenant_id": supabase_client.eq(tenant_id), "draft_id": supabase_client.eq(draft["draft_id"])},
+            {"review_notified_at": datetime.now(timezone.utc).isoformat()},
+        )
+    return delivered
+
+
+@gated(Feature.KNOWLEDGE_FLYWHEEL, default=0)
+async def retry_pending_reviews() -> int:
+    """Re-send drafts whose review notice never reached n8n. Returns how many got through."""
+    delivered = 0
+    for tenant_id in get_settings().allowed_tenant_ids:
+        rows = await supabase_client.select(
+            "sop_drafts",
+            {"tenant_id": supabase_client.eq(tenant_id), "status": "eq.draft_pending_review",
+             "review_notified_at": "is.null"},
+            columns="draft_id,doc_id,title,markdown,source_ticket_id", limit=20,
+        )
+        for row in rows:
+            if await notify_reviewer(tenant_id, {**row, "redactions": []}):
+                delivered += 1
+    return delivered
 
 
 def _strip_frontmatter(markdown: str) -> str:

@@ -45,13 +45,22 @@ async def post_signed(url: str, payload: dict[str, Any]) -> bool:
     return True
 
 
-async def notify_tier2(event: str, tenant_id: str, payload: dict[str, Any], text: str) -> bool:
-    """Tell technicians about something. `text` is the human-readable fallback."""
+async def notify_tier2(
+    event: str, tenant_id: str, payload: dict[str, Any], text: str, *, require_n8n: bool = False
+) -> bool:
+    """Tell technicians about something. `text` is the human-readable fallback.
+
+    require_n8n: only n8n delivery counts (e.g. SOP drafts, whose review buttons
+    only n8n renders). The plain Slack fallback is skipped.
+    """
     settings = get_settings()
     if settings.n8n_notify_webhook_url and settings.n8n_outbound_signing_secret.get_secret_value():
         envelope = {"event": event, "tenant_id": tenant_id, "data": payload, "text": text}
         if await post_signed(str(settings.n8n_notify_webhook_url), envelope):
             return True
+    if require_n8n:
+        logger.warning("n8n delivery required but failed event=%s tenant=%s; will retry", event, tenant_id)
+        return False
 
     token = settings.slack_bot_token.get_secret_value()
     if settings.slack_escalation_channel and token:

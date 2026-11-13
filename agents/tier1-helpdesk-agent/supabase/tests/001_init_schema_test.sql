@@ -193,10 +193,14 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- SOP drafts: frontmatter doc_id must match the row
+-- SOP drafts: frontmatter doc_id must match the row; review delivery is tracked
 -- ---------------------------------------------------------------------------
 do $$
 begin
+    insert into sop_drafts (tenant_id, source_ticket_id, doc_id, title, markdown, frontmatter)
+    values ('acme', 'T-RN', 'SOP-RN-1', 't', '# t', '{"doc_id": "SOP-RN-1"}');
+    assert (select review_notified_at from sop_drafts where doc_id = 'SOP-RN-1') is null,
+        'new drafts must start un-notified so the agent retries delivery';
     begin
         insert into sop_drafts (tenant_id, source_ticket_id, doc_id, title, markdown, frontmatter)
         values ('acme', 'B', 'SOP-NEW-001', 't', '# t', '{"doc_id": "SOP-OTHER"}');

@@ -84,6 +84,12 @@ async def maintenance_tick(run_housekeeping: bool) -> None:
                 logger.info("delivered %d pending outage notifications", delivered)
         except Exception:  # noqa: BLE001
             logger.exception("outage notification retry failed")
+    if settings.feature_enabled(Feature.KNOWLEDGE_FLYWHEEL):
+        try:
+            if delivered := await flywheel.retry_pending_reviews():
+                logger.info("delivered %d pending SOP-draft reviews", delivered)
+        except Exception:  # noqa: BLE001
+            logger.exception("SOP-draft review retry failed")
     if settings.feature_enabled(Feature.MULTI_TURN) or settings.feature_enabled(Feature.MANAGER_APPROVALS):
         try:
             if delivered := await conversation.retry_pending_escalations():

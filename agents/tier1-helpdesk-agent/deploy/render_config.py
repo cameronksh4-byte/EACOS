@@ -3,6 +3,8 @@
     python deploy/render_config.py deploy/deploy.env --out /path/to/vars.tfvars.json
     python deploy/render_config.py deploy/deploy.env --check        # validate only
     python deploy/render_config.py --generate-secrets               # print fresh random secrets
+    python deploy/render_config.py deploy/deploy.env --n8n-env deploy/acme-corp.n8n.env
+                                                                    # env file for your n8n instance
 
 The same `Settings` class the service uses at startup checks the configuration, so
 a missing tier requirement fails here, before anything is deployed. Values that
@@ -62,6 +64,8 @@ EXTRA_ENVIRONMENT = [
 ]
 # Deploy-script-only keys (not sent to Terraform).
 DEPLOY_ONLY = {"SUPABASE_DB_URL", "SOP_DIR", "CATALOG_CSV", "DIRECTORY_CSV", "N8N_API_URL", "N8N_API_KEY",
+               "N8N_PUBLIC_URL", "N8N_SLACK_ALERT_CHANNEL", "N8N_SLACK_SOP_REVIEW_CHANNEL", "N8N_SLACK_EXEC_CHANNEL",
+               "N8N_PROVISIONING_PROVIDER", "N8N_GRAPH_CLIENT_ID", "N8N_GRAPH_CLIENT_SECRET",
                "TF_STATE_BUCKET", "IMAGE_TAG"}
 
 _LINE = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
@@ -84,6 +88,47 @@ def parse_env_file(path: Path) -> dict[str, str]:
             value = value.split(" #", 1)[0].strip()
         values[key] = value
     return values
+
+
+# n8n webhook paths of the bundled workflows (integrations/n8n/workflows/).
+N8N_APPROVALS_PATH = "/webhook/helpdesk-approvals"
+N8N_NOTIFY_PATH = "/webhook/helpdesk-notify"
+N8N_SLACK_ACTIONS_PATH = "/webhook/helpdesk-slack-actions"
+
+
+def effective(cfg: dict[str, str]) -> dict[str, str]:
+    """Fill values derived from others (e.g. n8n webhook URLs from N8N_PUBLIC_URL)."""
+    out = dict(cfg)
+    base = out.get("N8N_PUBLIC_URL", "").rstrip("/")
+    if base:
+        out.setdefault("N8N_APPROVAL_WEBHOOK_URL", "")
+        out.setdefault("N8N_NOTIFY_WEBHOOK_URL", "")
+        if not out["N8N_APPROVAL_WEBHOOK_URL"] and out.get("SERVICE_TIER", "TIER_0_INCENTIVE") != "TIER_0_INCENTIVE":
+            out["N8N_APPROVAL_WEBHOOK_URL"] = base + N8N_APPROVALS_PATH
+        if not out["N8N_NOTIFY_WEBHOOK_URL"]:
+            out["N8N_NOTIFY_WEBHOOK_URL"] = base + N8N_NOTIFY_PATH
+    return out
+
+
+def _publicly_reachable_url_problem(name: str, url: str) -> str | None:
+    """The agent runs in AWS, so n8n URLs it calls must be public HTTPS (a tunnel for local n8n)."""
+    import ipaddress
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host:
+        return f"{name} must be an https:// URL that AWS can reach (got {url!r})"
+    local = host in ("localhost",) or host.endswith((".local", ".lan", ".internal", ".home", ".localhost"))
+    try:
+        ip = ipaddress.ip_address(host)
+        local = local or ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        pass
+    if local or "." not in host:
+        return (f"{name} points at {host}, which the agent in AWS can't reach. Expose your local n8n's "
+                f"/webhook/ paths through a tunnel (integrations/n8n/LOCAL_N8N.md) and use that public URL")
+    return None
 
 
 def _csv(value: str) -> list[str]:
@@ -118,7 +163,13 @@ def isolated_settings(env: dict[str, str]):
 
 def validate(cfg: dict[str, str]) -> list[str]:
     """Problems that would stop the deploy or the service. Empty list = good to go."""
+    cfg = effective(cfg)
     problems: list[str] = []
+    for name in ("N8N_APPROVAL_WEBHOOK_URL", "N8N_NOTIFY_WEBHOOK_URL", "N8N_PUBLIC_URL"):
+        if cfg.get(name):
+            problem = _publicly_reachable_url_problem(name, cfg[name])
+            if problem:
+                problems.append(problem)
     for key in ("AWS_REGION", "CLIENT_SLUG", "PUBLIC_HOSTNAME", "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
                 "VOYAGE_API_KEY", "WEBHOOK_SECRET"):
         if not cfg.get(key):
@@ -161,6 +212,7 @@ def validate(cfg: dict[str, str]) -> list[str]:
 
 
 def render(cfg: dict[str, str], image_tag: str) -> dict:
+    cfg = effective(cfg)
     out: dict = {"image_tag": image_tag}
     for key, var in {**TF_VARS, **TF_SECRETS}.items():
         if cfg.get(key):
@@ -183,6 +235,55 @@ def render(cfg: dict[str, str], image_tag: str) -> dict:
     return out
 
 
+def n8n_environment(cfg: dict[str, str]) -> dict[str, str]:
+    """Environment for the n8n instance, with every shared secret taken from deploy.env."""
+    cfg = effective(cfg)
+    alert = cfg.get("N8N_SLACK_ALERT_CHANNEL") or cfg.get("SLACK_ESCALATION_CHANNEL", "")
+    provider = cfg.get("N8N_PROVISIONING_PROVIDER") or {"microsoft_graph": "entra", "okta": "okta"}.get(
+        cfg.get("IDENTITY_PROVIDER", ""), "none")
+    tenants = ",".join(dict.fromkeys([cfg.get("CLIENT_SLUG", ""), *_csv(cfg.get("ALLOWED_TENANT_IDS", ""))]))
+    env = {
+        # Required by the workflows' Code nodes.
+        "N8N_BLOCK_ENV_ACCESS_IN_NODE": "false",
+        "NODE_FUNCTION_ALLOW_BUILTIN": "crypto",
+        # Public base URL of this n8n (the tunnel), so n8n shows the right webhook URLs.
+        "WEBHOOK_URL": cfg.get("N8N_PUBLIC_URL", "").rstrip("/") + "/" if cfg.get("N8N_PUBLIC_URL") else "",
+        # Shared with the agent. These must match deploy.env exactly.
+        "N8N_AGENT_SIGNING_SECRET": cfg.get("N8N_OUTBOUND_SIGNING_SECRET", ""),
+        "N8N_CALLBACK_SECRET": cfg.get("N8N_CALLBACK_SECRET", ""),
+        "AGENT_BASE_URL": f"https://{cfg.get('PUBLIC_HOSTNAME', '')}",
+        "AGENT_WEBHOOK_SECRET": cfg.get("WEBHOOK_SECRET", ""),
+        "AGENT_TENANTS": tenants,
+        "SLACK_BOT_TOKEN": cfg.get("SLACK_BOT_TOKEN", ""),
+        "SLACK_SIGNING_SECRET": cfg.get("SLACK_SIGNING_SECRET", ""),
+        "SLACK_ALERT_CHANNEL": alert,
+        "SLACK_SOP_REVIEW_CHANNEL": cfg.get("N8N_SLACK_SOP_REVIEW_CHANNEL") or alert,
+        "SLACK_EXEC_CHANNEL": cfg.get("N8N_SLACK_EXEC_CHANNEL") or alert,
+        "PROVISIONING_PROVIDER": provider,
+    }
+    if provider == "entra":
+        env["GRAPH_TENANT_ID"] = cfg.get("GRAPH_TENANT_ID", "")
+        env["GRAPH_CLIENT_ID"] = cfg.get("N8N_GRAPH_CLIENT_ID") or cfg.get("GRAPH_CLIENT_ID", "")
+        env["GRAPH_CLIENT_SECRET"] = cfg.get("N8N_GRAPH_CLIENT_SECRET") or cfg.get("GRAPH_CLIENT_SECRET", "")
+    if provider == "okta":
+        env["OKTA_DOMAIN"] = cfg.get("OKTA_DOMAIN", "")
+        env["OKTA_API_TOKEN"] = cfg.get("OKTA_API_TOKEN", "")
+    return env
+
+
+def n8n_env_problems(env: dict[str, str]) -> list[str]:
+    required = ["N8N_AGENT_SIGNING_SECRET", "N8N_CALLBACK_SECRET", "AGENT_WEBHOOK_SECRET", "SLACK_BOT_TOKEN",
+                "SLACK_SIGNING_SECRET", "SLACK_ALERT_CHANNEL", "WEBHOOK_URL"]
+    if env.get("PROVISIONING_PROVIDER") == "entra":
+        required += ["GRAPH_TENANT_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET"]
+    if env.get("PROVISIONING_PROVIDER") == "okta":
+        required += ["OKTA_DOMAIN", "OKTA_API_TOKEN"]
+    source = {"N8N_AGENT_SIGNING_SECRET": "N8N_OUTBOUND_SIGNING_SECRET", "AGENT_WEBHOOK_SECRET": "WEBHOOK_SECRET",
+              "SLACK_ALERT_CHANNEL": "SLACK_ESCALATION_CHANNEL or N8N_SLACK_ALERT_CHANNEL",
+              "WEBHOOK_URL": "N8N_PUBLIC_URL"}
+    return [f"n8n needs {k} (set {source.get(k, k)} in deploy.env)" for k in required if not env.get(k)]
+
+
 def generate_secrets() -> str:
     names = ["WEBHOOK_SECRET", "N8N_OUTBOUND_SIGNING_SECRET", "N8N_CALLBACK_SECRET"]
     return "\n".join(f"{n}={secrets.token_urlsafe(32)}" for n in names)
@@ -196,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--generate-secrets", action="store_true")
     parser.add_argument("--get", metavar="KEY", help="print one value (for deploy.sh)")
+    parser.add_argument("--n8n-env", type=Path, metavar="FILE",
+                        help="write the environment file for your n8n instance (mode 600)")
     args = parser.parse_args(argv)
 
     if args.generate_secrets:
@@ -205,7 +308,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("env_file is required")
     cfg = parse_env_file(args.env_file)
     if args.get:
-        print(cfg.get(args.get, ""))
+        print(effective(cfg).get(args.get, ""))
+        return 0
+    if args.n8n_env:
+        env = n8n_environment(cfg)
+        problems = n8n_env_problems(env)
+        fd = os.open(args.n8n_env, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write("# Environment for the help desk n8n workflows, generated from deploy.env by\n"
+                    "# deploy/render_config.py --n8n-env. Load it into n8n and restart n8n.\n")
+            f.writelines(f"{k}={v}\n" for k, v in env.items())
+        for problem in problems:
+            print(f"warning: {problem}", file=sys.stderr)
         return 0
     problems = validate(cfg)
     if problems:
