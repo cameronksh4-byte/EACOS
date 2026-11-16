@@ -179,7 +179,7 @@ make test-sql   # migration + SQL behaviour checks against a scratch Postgres+pg
 make lint
 cd terraform && terraform test                        # plan-only tests with a mocked AWS provider
 node --test integrations/n8n/test/handlers.test.js   # n8n Code-node logic
-node --test integrations/website/test/                   # website free trial: chat, sign-up, Stripe
+node --test integrations/website/test/*.test.mjs     # website free trial: chat, sign-up, Stripe
 python integrations/n8n/test/e2e_n8n.py              # optional: inside real n8n (Node >= 24)
 ```
 

@@ -38,7 +38,7 @@ mistake, and a visitor can't by tampering.
 | `assets/helpdesk-widget.js` | `assets/helpdesk/` | A plain, unstyled chat widget to restyle or replace |
 | `netlify/lib/helpdesk-stripe.mjs` | `netlify/lib/` | Stripe Checkout, webhook and customer portal. No dependencies (no Stripe SDK) |
 | `netlify/functions/api-helpdesk-billing.mjs` | `netlify/functions/` | Wires the Stripe logic to the site's helpers |
-| `test/*.test.mjs` | (stays here) | `node --test integrations/website/test/` (25 tests) |
+| `test/*.test.mjs` | (stays here) | `node --test integrations/website/test/*.test.mjs` (25 tests) |
 
 ## Website setup
 
