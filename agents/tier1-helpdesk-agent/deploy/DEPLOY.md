@@ -68,7 +68,7 @@ embeddings (cents), and Supabase (free tier works for a pilot). WAF adds ~$6/mon
 cd agents/tier1-helpdesk-agent
 cp deploy/deploy.env.example deploy/acme-corp.env      # one file per client; git-ignored
 chmod 600 deploy/acme-corp.env
-python3 deploy/render_config.py --generate-secrets     # paste these three lines into the file
+python3 deploy/render_config.py --generate-secrets     # paste these lines into the file
 ```
 
 **3a. Create the Slack app first** (5 minutes). The agent needs its token, and Slack needs the
@@ -95,8 +95,11 @@ Not using Slack? Outage alerts still need somewhere to go: set `N8N_NOTIFY_WEBHO
 Validate at any time (it uses the agent's own configuration rules, so what passes here also passes at startup):
 
 ```bash
-python3 deploy/render_config.py deploy/acme-corp.env --check
+deploy/deploy.sh deploy/acme-corp.env --check     # needs no AWS access; creates deploy/.venv on first use
 ```
+
+The check rejects unknown setting names (typos), so a misspelled line can't be silently ignored.
+Any setting the service reads (see `app/config.py`) can go in this file and is passed to the container.
 
 | For | Also fill in |
 |---|---|
@@ -109,8 +112,13 @@ python3 deploy/render_config.py deploy/acme-corp.env --check
 
 ```bash
 deploy/deploy.sh deploy/acme-corp.env --plan     # dry run: validates, shows the Terraform plan
-deploy/deploy.sh deploy/acme-corp.env            # deploys; asks before creating the state bucket and before applying
+deploy/deploy.sh deploy/acme-corp.env            # deploys; asks before each stage that changes something
 ```
+
+On the very first run, `--plan` asks to create the Terraform state bucket (the only thing it ever
+creates), then shows the plan. The real deploy asks three times: for the state bucket (first run
+only); before it applies the database schema and pushes the image; and, with the full
+infrastructure plan on screen, before it applies that plan.
 
 The first deploy takes about 10-15 minutes: the image build, certificate validation, and ECS
 starting up. It ends with a smoke test:
@@ -157,8 +165,8 @@ to prove the tunnel and the shared secret. Point the Slack app's *Interactivity*
 | Deploy a code update | `git pull`, then `deploy/deploy.sh deploy/acme-corp.env` (new commit = new immutable image) |
 | Upgrade a client's tier | Set `SERVICE_TIER` (and that tier's settings), re-run. A missing setting fails at `--plan`, before anything changes |
 | End or extend a trial | Change `TRIAL_EXPIRES_ON`, re-run |
-| Add or update SOPs | Add Markdown files to `SOP_DIR`, re-run (only changed chunks are re-embedded). Or: `python -m ingest.sync_docs --tenant <client> --docs <dir> --prune` |
-| Roll back | Set `IMAGE_TAG=<previous tag>` (see `aws ecr list-images --repository-name <client>-tier1-agent`), re-run. Remove the line afterwards |
+| Add or update SOPs | Edit the Markdown files in `SOP_DIR`, then `deploy/deploy.sh deploy/<client>.env --sync-sops` (only changed chunks are re-embedded; needs no AWS access). Add `--prune` to delete chunks whose files you removed. SOPs approved through the Tier 2 flywheel are never pruned |
+| Roll back | Set `IMAGE_TAG=<previous tag>` (see `aws ecr list-images --repository-name <client>-tier1-agent`), re-run. Remove the line afterwards. If that tag isn't in the registry the deploy stops; it never builds current code under an old tag |
 | Turn a feature off now | `DISABLED_FEATURES=<feature>`, re-run (e.g. `screenshot_vision`) |
 | Rotate a secret | Change it in the env file (and in n8n or Slack if shared), re-run |
 | Logs | `aws logs tail /ecs/<client>-tier1-agent --follow` |
@@ -174,7 +182,32 @@ to prove the tunnel and the shared secret. Point the Slack app's *Interactivity*
 | Certificate stays *Pending validation* | `ROUTE53_ZONE_ID` must be the zone for `PUBLIC_HOSTNAME`'s domain. With your own ACM cert, it must be issued and in `AWS_REGION` |
 | `aws ecs wait services-stable` fails | `aws logs tail /ecs/<client>-tier1-agent --since 15m`. `missing required settings` means a tier setting is empty; `exec format error` means the image wasn't built for arm64 |
 | Smoke test: triage returns 5xx or "Automatic triage skipped" | Supabase URL/key wrong, schema not applied, or the Anthropic key or Bedrock model access is missing. The log line says which |
-| `Secrets Manager … scheduled for deletion` after a destroy | Secrets are kept 7 days. `aws secretsmanager restore-secret --secret-id <client>-tier1-agent/runtime`, or delete it with `--force-delete-without-recovery` |
+| `Secrets Manager … scheduled for deletion` after a destroy | Only for a secret destroyed by an older version of this kit (it kept secrets 7 days): `aws secretsmanager delete-secret --secret-id <client>-tier1-agent/runtime --force-delete-without-recovery`, then re-run. Current versions delete the secret at once |
 | Slack: "Your URL didn't respond" | DNS not propagated yet, or `SLACK_SIGNING_SECRET` not deployed. Re-run the deploy after setting it |
 | Approval clicks say "already decided or expired" | Expected after a decision or after 72 h. A wrong approver also gets this message |
-| `n8n_ping` FAIL: HTTP 401 / 404 / not reachable | 401: reload `deploy/<client>.n8n.env` into n8n and restart it. 404: publish the workflows. Not reachable: n8n or the tunnel is down (`integrations/n8n/LOCAL_N8N.md`) |
+| A Tier 2 alert, approval card or SOP draft never arrived | n8n answers the agent only after Slack accepted the message, so the agent knows and keeps retrying (alerts, drafts) or escalates (approval cards). Look for `signed webhook rejected ... status=502` in the agent log and the failed execution in n8n: usually the bot isn't in the channel, or the approver has no Slack account |
+| `--ping-n8n` FAIL: HTTP 401 / 404 / not reachable | 401: reload `deploy/<client>.n8n.env` into n8n and restart it. 404: publish the workflows. Not reachable: n8n or the tunnel is down (`integrations/n8n/LOCAL_N8N.md`) |
+
+## 8. Website free trial (your own deployment only)
+
+Lets visitors try the help desk on your company website: 5 free questions, then a free account,
+then paid plans and credit packs. It is off unless you turn it on, and it belongs on your own
+deployment, not a client's.
+
+1. In the env file, section 6: set `WEBCHAT_ENABLED=true`, a `WEBCHAT_SIGNING_SECRET`
+   (`python3 deploy/render_config.py --generate-secrets`), `WEBCHAT_SOP_DIR` (start with
+   `ingest/sample_sops`), and the two page URLs.
+2. Re-run the deploy. It loads the chat's SOPs into its own tenant (`web-demo`), and the smoke
+   test confirms the chat route demands the website's signature.
+3. Give the website the same signing secret and follow `integrations/website/README.md`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `WEBCHAT_VISITOR_FREE_USES` | 5 | Questions before sign-up is required |
+| `WEBCHAT_IP_DAILY_FREE_USES` | 15 | Anonymous questions per network per day (stops cookie-clearing) |
+| `WEBCHAT_PLAN_MONTHLY_LIMITS` | `{"free": 20, "starter": 250}` | Questions per month by plan. Add a plan here before selling it |
+| `WEBCHAT_MONTHLY_BUDGET_USD` | 10 | Hard cap on model spend for the whole website chat |
+
+Changing a number is an env-file edit and a re-deploy. When the budget is used up, visitors are told
+the assistant is unavailable and their question isn't counted. Plans and credits are set by the
+website's payment handler through `POST /v1/webchat/grants`; payments are not built yet.

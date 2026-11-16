@@ -90,7 +90,7 @@ The file includes `WEBHOOK_URL=<N8N_PUBLIC_URL>/`, so n8n shows the public webho
    `https://n8n-hooks.acme.com/webhook/helpdesk-slack-actions`.
 3. Verify. The deploy runs this automatically, and you can run it any time:
    ```bash
-   python3 deploy/n8n_ping.py deploy/acme-corp.env
+   deploy/deploy.sh deploy/acme-corp.env --ping-n8n
    ```
    It sends a signed no-op event to both webhooks through the public URL:
 

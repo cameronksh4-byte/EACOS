@@ -49,9 +49,7 @@ def write_env(path: Path, values: dict[str, str]) -> Path:
 
 def test_example_file_parses_and_lists_every_key_render_knows():
     cfg = render_config.parse_env_file(ROOT / "deploy" / "deploy.env.example")
-    known = (set(render_config.TF_VARS) | set(render_config.TF_SECRETS) | set(render_config.TF_LISTS)
-             | set(render_config.TF_NUMBERS) | set(render_config.TF_BOOLS) | set(render_config.INTEGRATION_SECRETS)
-             | set(render_config.EXTRA_ENVIRONMENT) | render_config.DEPLOY_ONLY)
+    known = render_config.known_keys()  # mapped keys, deploy-only keys, and every setting the service reads
     unknown = set(cfg) - known
     assert not unknown, f"deploy.env.example keys render_config ignores: {unknown}"
 

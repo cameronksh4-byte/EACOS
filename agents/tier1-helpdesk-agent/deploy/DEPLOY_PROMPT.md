@@ -43,23 +43,24 @@ Deployment details:
    today for Tier 0), and run `python3 deploy/render_config.py --generate-secrets`, writing its
    output into the file without showing it. Then list the remaining empty variables this tier
    needs, with where each comes from (from the file's comments and DEPLOY.md section 3), and wait
-   while I fill them in. Repeat `python3 deploy/render_config.py deploy/<client-slug>.env --check`
-   until it passes.
-3. **Dry run.** Run `deploy/deploy.sh deploy/<client-slug>.env --plan` (you'll need gate (a) the
-   first time). Summarise the plan for me: how many resources it creates, changes and destroys,
+   while I fill them in. Repeat `deploy/deploy.sh deploy/<client-slug>.env --check`
+   until it passes (it needs no AWS access and sets up the helper Python environment itself).
+3. **Dry run.** Run `deploy/deploy.sh deploy/<client-slug>.env --plan`. The first time it asks to
+   create the Terraform state bucket (gate (a)); that bucket is the only thing `--plan` creates. Summarise the plan for me: how many resources it creates, changes and destroys,
    the main ones (load balancer, ECS service, certificate, DNS record), and anything destroyed or
    replaced. Wait for gate (b).
 4. **Deploy.** Run `deploy/deploy.sh deploy/<client-slug>.env`, answering its prompts only as
-   I've approved. Report each of the 8 steps as it completes. If the smoke test fails, gather
+   I've approved. It asks before it applies the database schema and pushes the image, and again
+   with the full infrastructure plan before applying it: show me that plan and wait for my yes. Report each of the 8 steps as it completes. If the smoke test fails, gather
    `aws logs tail /ecs/<client-slug>-tier1-agent --since 15m` and diagnose using DEPLOY.md section 7.
 5. **Integrations.** Walk me through DEPLOY.md section 5 for this tier, one step at a time:
    verifying the Slack Event Subscriptions URL (Retry) now that the agent is live. For Tier 1+, I run
    n8n locally: follow `integrations/n8n/LOCAL_N8N.md`. Help me set up a tunnel that exposes only
    `/webhook/*` (check that `/` returns 404 publicly), have me load the generated
    `deploy/<client-slug>.n8n.env` into my n8n and restart it (don't display its contents), and run
-   `python3 deploy/n8n_ping.py deploy/<client-slug>.env` until both checks pass.
+   `deploy/deploy.sh deploy/<client-slug>.env --ping-n8n` until both checks pass.
 6. **Final check.** Run the smoke test again
-   (`python3 deploy/smoke_test.py --host <hostname> --tenant <client-slug> --tier <tier> --secret "$(python3 deploy/render_config.py deploy/<client-slug>.env --get WEBHOOK_SECRET)"`),
+   (`SMOKE_WEBHOOK_SECRET="$(deploy/.venv/bin/python deploy/render_config.py deploy/<client-slug>.env --get WEBHOOK_SECRET)" deploy/.venv/bin/python deploy/smoke_test.py --host <hostname> --tenant <client-slug> --tier <tier>`; the secret goes in the environment, never on the command line),
    then ask me to DM the Slack bot "my VPN says portal not found" and confirm it answers with
    steps from the VPN SOP.
 7. **Hand-off report.** Give me the URL, tier, image tag, AWS account and region, the state

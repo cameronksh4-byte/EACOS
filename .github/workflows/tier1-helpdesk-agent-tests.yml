@@ -43,6 +43,8 @@ jobs:
         run: python integrations/n8n/build_workflows.py --check
       - name: Code-node unit tests
         run: node --test integrations/n8n/test/handlers.test.js
+      - name: Website free-trial handler tests
+        run: node --test integrations/website/test/helpdesk-core.test.mjs
 
   schema:
     runs-on: ubuntu-latest

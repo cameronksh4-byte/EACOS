@@ -260,3 +260,31 @@ def test_startup_requires_a_real_secret_and_a_separate_tenant():
     assert any("WEBCHAT_TENANT_ID" in m for m in shared.missing_core_settings())
     assert Settings(_env_file=None, **base, webchat_signing_secret=SECRET).missing_core_settings() == []
     assert guardrails.TRIAGE_UNAVAILABLE == "triage_unavailable"
+
+
+# --- the website's real signing code against the real app ------------------------------
+
+
+def test_request_signed_by_the_website_code_is_accepted_by_the_agent(chat):
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from app import main
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = Path(__file__).resolve().parents[1] / "integrations" / "website" / "test" / "sign_request.mjs"
+    payload = {"visitor_id": VISITOR, "client_ip": "203.0.113.7", "account_email": None,
+               "message": "My VPN won't connect — «portal not found»"}
+    out = subprocess.run([node, str(script), SECRET, json.dumps(payload)], capture_output=True, text=True,
+                         check=True, timeout=60).stdout
+    request = json.loads(out)
+    with TestClient(main.app) as client:
+        r = client.post("/v1/webchat/message", content=request["body"].encode(),
+                        headers={"Content-Type": "application/json", signing.SIGNATURE_HEADER: request["signature"]})
+        assert r.status_code == 200 and r.json()["status"] == "answered", r.text
+        tampered = request["body"].replace("203.0.113.7", "203.0.113.8").encode()
+        assert client.post("/v1/webchat/message", content=tampered,
+                           headers={signing.SIGNATURE_HEADER: request["signature"]}).status_code == 401

@@ -63,6 +63,19 @@ Both use fixed, courteous templates, never model-written text.
 | `POST /v1/webhooks/ticket-resolved` | `x-webhook-secret` | 2 |
 | `POST /v1/callbacks/sop-draft` | n8n signature | 2 |
 | `POST /v1/reports/weekly?tenant_id=…` | `x-webhook-secret` | 2 |
+| `POST /v1/webchat/message` · `/v1/webchat/grants` · `/v1/webchat/account` | website signature | any, when `WEBCHAT_ENABLED` |
+
+There is no `/docs` or `/openapi.json`: a schema would list routes this deployment's tier hides.
+
+## Website free trial
+
+Off by default. With `WEBCHAT_ENABLED=true`, the company website can offer the help desk to
+visitors: 5 free questions, then a free account (20 a month), then a paid plan with a monthly
+allowance and credit packs. The website's server signs every request; browsers never reach this
+API. Each question is counted in the database before any model call, answered from the chat's own
+tenant and SOPs in sandbox mode (no threads, outage detection, approvals or Tier 2 pages), and
+spends against its own hard monthly budget. Contract, reference website code and the hand-off
+prompt for the website build are in `integrations/website/`.
 
 ## n8n contract
 
@@ -77,7 +90,7 @@ Events the agent POSTs:
 | `approval.requested` | `N8N_APPROVAL_WEBHOOK_URL` | Render a Slack/Teams card with [Approve]/[Deny]. Echo `approval_id` + `callback_nonce` to `callback_url`. |
 | `provisioning.requested` | `N8N_APPROVAL_WEBHOOK_URL` | Add `requester_email` to `provisioning_group` in Entra ID / Okta. |
 | `approval.denied` | `N8N_APPROVAL_WEBHOOK_URL` | Tell the requester. |
-| `outage.detected` · `thread.escalated` | `N8N_NOTIFY_WEBHOOK_URL` (or Slack) | Page technicians. |
+| `outage.detected` · `thread.escalated` | `N8N_NOTIFY_WEBHOOK_URL` (or Slack) | Page technicians. Sent for every result that requires Tier 2, on every channel. |
 | `sop_draft.created` | `N8N_NOTIFY_WEBHOOK_URL` | Send the draft to the IT manager with [Ingest]/[Reject]. |
 | `report.weekly` | `N8N_NOTIFY_WEBHOOK_URL` | Deliver the executive report (Markdown included). |
 
@@ -90,6 +103,10 @@ Callbacks n8n POSTs (signed):
 // /v1/callbacks/sop-draft
 {"tenant_id": "acme-corp", "draft_id": "…", "decision": "approve", "reviewer_email": "it@acme.com"}
 ```
+
+**n8n must answer after the work is done.** The agent records a 2xx as "delivered" (it stops
+retrying, and outage tickets skip their own escalation), so the bundled workflows respond 200
+only once Slack or the directory accepted the request, and 502 otherwise.
 
 An approval is accepted once, only from the designated approver, only with the nonce, and
 before expiry. Replays and wrong approvers get 409. Schedule `POST /v1/reports/weekly` from an
@@ -145,6 +162,8 @@ missing setting fails at `--plan`, before anything changes.
 ## Integrations
 
 - **Slack:** `integrations/slack/app-manifest.yaml` (events → agent, button clicks → n8n).
+- **Website:** `integrations/website/` holds the free-trial contract, the Netlify function and a
+  widget for the company site, with tests.
 - **n8n:** `integrations/n8n/` holds 4 importable workflows (approval cards + Entra ID/Okta
   provisioning, Slack button handling, notifications, weekly reports), generated from tested JS
   sources and verified end to end inside n8n 2.47.5.
@@ -159,6 +178,7 @@ make test-sql   # migration + SQL behaviour checks against a scratch Postgres+pg
 make lint
 cd terraform && terraform test                        # plan-only tests with a mocked AWS provider
 node --test integrations/n8n/test/handlers.test.js   # n8n Code-node logic
+node --test integrations/website/test/helpdesk-core.test.mjs   # website free-trial handler
 python integrations/n8n/test/e2e_n8n.py              # optional: inside real n8n (Node >= 24)
 ```
 
@@ -168,9 +188,10 @@ under QEMU.
 
 ## Operations
 
-- **Background loop** (every minute, per task): retries owed Tier 2 notifications. Every 5 minutes it
+- **Background loop** (every minute): retries owed Tier 2 notifications. Every 5 minutes it
   also runs `run_housekeeping()` (expires approvals and escalates their threads, resolves stale
-  outages, prunes `recent_tickets`). All idempotent, so several tasks running it is fine.
+  outages Tier 2 already knows about, prunes `recent_tickets`). Every worker runs the loop, and a
+  database lease lets one of them take each tick, so a notice is retried once, not once per worker.
 - **Costs**: most tickets cost a fraction of a cent on Haiku 5.5. Sonnet 5.5 runs only on risky
   tickets. Outage duplicates cost one embedding and no model tokens. ROI credits 15 minutes only
   to tickets resolved with cited steps (outage broadcasts are reported separately).
@@ -199,10 +220,11 @@ app/
     approvals.py           catalog, approval cards, callbacks, provisioning
     flywheel.py            resolved ticket → sanitized SOP draft → one-click ingest
     reports.py             weekly executive report
+    webchat.py             public website chat: metering, sandboxed answers, plans and credits
     chunking.py, notifier.py, signing.py, background.py, supabase_client.py, ticketing.py
 ingest/                    SOP ingest CLI, catalog/directory loader, samples
 deploy/                    deploy.sh, deploy.env.example, DEPLOY.md, DEPLOY_PROMPT.md, smoke test
-integrations/              Slack app manifest, n8n workflows (+ sources and tests)
+integrations/              Slack app manifest, n8n workflows, website free trial (+ sources and tests)
 supabase/migrations/       schema, RLS, SQL functions; supabase/tests/ = SQL checks
 terraform/                 infrastructure + plan tests
 scripts/lock_requirements.py

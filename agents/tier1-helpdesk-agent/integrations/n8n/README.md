@@ -11,7 +11,8 @@ Four workflows connect the agent to Slack and to Entra ID / Okta. Tier 0 needs n
 | `helpdesk-weekly-reports.json` | (schedule, Mondays 08:00 UTC) | Asks the agent to build and deliver each tenant's weekly report |
 
 Every inbound request is verified (the agent's HMAC signature, or Slack's), and anything
-unverified gets 401 with no side effects. The clicker's identity comes from Slack, never
+unverified gets 401 with no side effects. Requester-written text is escaped before it is posted,
+so a ticket can't ping `@channel` or forge a link in a technicians' channel. The clicker's identity comes from Slack, never
 from the button, and the agent only accepts a decision from the designated approver.
 
 ## Install
@@ -59,6 +60,15 @@ node --test integrations/n8n/test/handlers.test.js
 N8N_BIN=…/node_modules/n8n/bin/n8n NODE_BIN=…/node python integrations/n8n/test/e2e_n8n.py
 ```
 
-The end-to-end run was last verified on n8n 2.47.5: 11 checks covering the deploy ping, card delivery,
+The end-to-end run was last verified on n8n 2.47.5: 12 checks covering the deploy ping, card delivery,
 signature rejection in both directions, approve/ingest clicks producing callbacks the agent
-accepts, notification routing, and weekly reports per tenant.
+accepts, notification routing, weekly reports per tenant, and that the agent sees a failure
+(not "delivered") when Slack refuses a post.
+
+## How delivery is confirmed
+
+The two workflows the agent calls (`helpdesk-approvals`, `helpdesk-notify`) run
+Webhook → Verify → Handle → Respond. They answer 200 only after Slack or the directory accepted
+the work, and 502 if it failed, because the agent treats 2xx as delivered and stops retrying.
+If you edit them, keep the Respond node last. The Slack button workflow is the exception: Slack
+needs its answer within 3 seconds, so it responds first.
