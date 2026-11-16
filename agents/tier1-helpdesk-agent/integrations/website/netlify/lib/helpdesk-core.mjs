@@ -83,6 +83,36 @@ function json(obj, status = 200, cookies = []) {
   return new Response(JSON.stringify(obj), { status, headers });
 }
 
+// Signed calls to the agent. Also used by the billing handler (helpdesk-stripe.mjs).
+export function createAgentClient({ env, fetch }) {
+  const agentUrl = String(env.HELPDESK_AGENT_URL || "").replace(/\/+$/, "");
+  const signingSecret = env.HELPDESK_SIGNING_SECRET || "";
+
+  async function agent(path, payload) {
+    const body = JSON.stringify(payload);
+    const res = await fetch(`${agentUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Agent-Signature": signAgent(signingSecret, body) },
+      body,
+      signal: AbortSignal.timeout(25000),
+    });
+    let data = null;
+    try { data = await res.json(); } catch { /* not JSON */ }
+    return { status: res.status, data };
+  }
+
+  // Plan change and/or credits, once a payment is confirmed (server side only).
+  // grant_id must be the payment's own ID, so a retried payment webhook can't grant twice.
+  async function grant({ grant_id, email, plan = null, add_credits = 0 }) {
+    return agent("/v1/webchat/grants", { grant_id, email, plan, add_credits });
+  }
+
+  return { agent, grant };
+}
+
+export const accountFromCookies = (cookieSecret, cookieHeader) =>
+  readToken(cookieSecret, "account", parseCookies(cookieHeader)[ACCOUNT_COOKIE]);
+
 /**
  * deps:
  *   env        { HELPDESK_AGENT_URL, HELPDESK_SIGNING_SECRET, HELPDESK_COOKIE_SECRET, HELPDESK_SITE_URL }
@@ -102,24 +132,7 @@ export function createHandler(deps) {
   const siteUrl = String(env.HELPDESK_SITE_URL || "").replace(/\/+$/, "");
   const configured = agentUrl.startsWith("https://") && signingSecret.length >= 32 && cookieSecret.length >= 32;
 
-  async function agent(path, payload) {
-    const body = JSON.stringify(payload);
-    const res = await deps.fetch(`${agentUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Agent-Signature": signAgent(signingSecret, body) },
-      body,
-      signal: AbortSignal.timeout(25000),
-    });
-    let data = null;
-    try { data = await res.json(); } catch { /* not JSON */ }
-    return { status: res.status, data };
-  }
-
-  // Exported for your payment handler: call it once a payment is confirmed (server side only).
-  // grant_id must be the payment's own ID, so a retried payment webhook can't grant twice.
-  async function grant({ grant_id, email, plan = null, add_credits = 0 }) {
-    return agent("/v1/webchat/grants", { grant_id, email, plan, add_credits });
-  }
+  const { agent, grant } = createAgentClient({ env, fetch: deps.fetch });
 
   const visitorOf = (cookies) => readVisitorCookie(cookieSecret, cookies[VISITOR_COOKIE]);
   const accountOf = (cookies) => readToken(cookieSecret, "account", cookies[ACCOUNT_COOKIE]);

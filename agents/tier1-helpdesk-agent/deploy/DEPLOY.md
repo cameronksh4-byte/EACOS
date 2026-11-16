@@ -212,4 +212,5 @@ deployment, not a client's.
 Prices are not settings here: the agent counts questions, and the website and payment provider hold
 the prices. Changing a number is an env-file edit and a re-deploy. When the budget is used up, visitors are told
 the assistant is unavailable and their question isn't counted. Plans and credits are set by the
-website's payment handler through `POST /v1/webchat/grants`; payments are not built yet.
+website's Stripe webhook through `POST /v1/webchat/grants` (setup: `integrations/website/README.md`,
+*Payments*). The agent itself holds no Stripe keys and no prices.

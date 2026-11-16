@@ -44,7 +44,7 @@ jobs:
       - name: Code-node unit tests
         run: node --test integrations/n8n/test/handlers.test.js
       - name: Website free-trial handler tests
-        run: node --test integrations/website/test/helpdesk-core.test.mjs
+        run: node --test integrations/website/test/helpdesk-core.test.mjs integrations/website/test/helpdesk-stripe.test.mjs
 
   schema:
     runs-on: ubuntu-latest

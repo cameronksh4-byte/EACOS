@@ -36,7 +36,9 @@ mistake, and a visitor can't by tampering.
 | `netlify/lib/helpdesk-core.mjs` | `netlify/lib/` | All the logic. No dependencies. Don't edit; it's tested here |
 | `netlify/functions/api-helpdesk.mjs` | `netlify/functions/` | Wires the logic to the site's existing helpers (`originOk`, `rateLimit`, `sendEmail`, Blobs) |
 | `assets/helpdesk-widget.js` | `assets/helpdesk/` | A plain, unstyled chat widget to restyle or replace |
-| `test/helpdesk-core.test.mjs` | (stays here) | `node --test integrations/website/test/helpdesk-core.test.mjs` |
+| `netlify/lib/helpdesk-stripe.mjs` | `netlify/lib/` | Stripe Checkout, webhook and customer portal. No dependencies (no Stripe SDK) |
+| `netlify/functions/api-helpdesk-billing.mjs` | `netlify/functions/` | Wires the Stripe logic to the site's helpers |
+| `test/*.test.mjs` | (stays here) | `node --test integrations/website/test/` (25 tests) |
 
 ## Website setup
 
@@ -53,7 +55,8 @@ mistake, and a visitor can't by tampering.
 3. Build a page at `/helpdesk/` with `<div id="helpdesk"></div>` and the widget script. After
    the emailed link is opened, the visitor lands on `/helpdesk/?signup=done` (or
    `?signup=expired`).
-4. Add the page that `WEBCHAT_UPGRADE_URL` points to (plans and credit packs).
+4. Add the page that `WEBCHAT_UPGRADE_URL` points to (plans and credit packs), then follow
+   *Payments* below.
 
 ## Agent setup (deploy env file, section 6)
 
@@ -110,21 +113,69 @@ refused. `helpdesk-core.mjs` does this for you (`signAgent`).
 | `POST /v1/webchat/grants` | `{"grant_id", "email", "plan"?, "add_credits"?}` | Plan change and/or credits. Applied once per `grant_id` |
 | `POST /v1/webchat/account` | `{"email"}` | Plan, usage this month, credits. 404 if the account has never asked a question or received a grant |
 
-## Payments (not built yet: the provider is still to be chosen)
+## Payments (Stripe Checkout)
 
-Whatever takes the money, the hand-over to the agent is one signed call from the website's
-server once payment is confirmed:
-
-```js
-import handler from "./api-helpdesk.mjs";
-await handler.grant({ grant_id: "<the payment's own ID>", email, plan: "starter" });       // subscription started
-await handler.grant({ grant_id: "<the payment's own ID>", email, add_credits: 50 });       // $20 credit pack bought
-await handler.grant({ grant_id: "<cancellation event ID>", email, plan: "free" });         // subscription ended
+```
+browser ─► POST /api/helpdesk/checkout {"product": "credits" | "starter" | "pro"} ─► {"url"} ─► Stripe's page
+Stripe  ─► POST /api/helpdesk/stripe-webhook (signed by Stripe) ─► agent  POST /v1/webchat/grants
+browser ─► POST /api/helpdesk/portal ─► {"url"} ─► Stripe's customer portal (cancel, switch plan, update card)
 ```
 
-Use the payment's own ID as `grant_id`. Payment providers retry their webhooks; the agent applies
-each `grant_id` once, so a retry never grants twice. Verify the provider's webhook signature
-before calling `grant`, and take the email from the payment record, never from the browser.
+Card details never touch the site. What someone bought is decided only by Stripe's signed
+webhook, never by the browser returning from checkout. Only a signed-in (verified) account can
+buy, and the purchase is tied to that address on the server.
+
+| Stripe event | What happens |
+|---|---|
+| `checkout.session.completed`, `checkout.session.async_payment_succeeded` (paid) | Credit pack: +50 questions. Subscription: plan set to `starter` or `pro` |
+| `customer.subscription.updated` | Plan follows the subscription as it is now (upgrade, downgrade). A failed renewal keeps the plan while Stripe retries the card |
+| `customer.subscription.deleted` | Plan back to `free`. Unused credits are kept |
+| `charge.refunded`, `charge.dispute.created` | The owner is alerted. Credits already granted are not removed automatically |
+
+Each grant is keyed by Stripe's own ID (the checkout session, or the event), and the agent
+applies each key once, so Stripe's retries can never grant twice. If the agent can't be
+reached, the webhook answers 500 and Stripe retries for up to three days.
+
+### One-time Stripe setup (do it in test mode first)
+
+1. **Products and prices.** Create three: *Credit pack*, $20, one-time. *Starter*, $79, recurring
+   monthly. *Pro*, $149, recurring monthly. Copy each price ID (`price_...`).
+2. **API key.** Developers → API keys → create a *restricted* key with write access to Checkout
+   Sessions and Customer portal, and read access to Customers and Subscriptions. Nothing else.
+3. **Webhook.** Developers → Webhooks → add endpoint
+   `https://valleyagentworks.com/api/helpdesk/stripe-webhook` with exactly the six events in
+   the table above. Copy its signing secret (`whsec_...`).
+4. **Customer portal.** Settings → Billing → Customer portal: allow cancelling, and switching
+   between Starter and Pro. Save (the portal link doesn't work until this is saved once).
+5. **Netlify environment variables:** `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+   `STRIPE_PRICE_CREDITS`, `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PRO` (and optionally
+   `HELPDESK_CREDIT_PACK_SIZE`, default 50).
+6. **Try it in test mode** with card `4242 4242 4242 4242`: buy a pack (the counter goes up by
+   50), subscribe, switch plan and cancel in the portal. Then repeat steps 1 to 5 with live keys.
+
+Test mode and live mode have separate keys, price IDs and webhook secrets.
+
+### Buttons on the plans page
+
+```js
+async function buy(product) {                      // "credits" | "starter" | "pro"
+  const r = await fetch("/api/helpdesk/checkout", { method: "POST", credentials: "same-origin",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product }) });
+  if (r.status === 401) { location.href = "/helpdesk/?signup=needed"; return; }   // sign up first
+  const d = await r.json();
+  if (d.url) location.href = d.url;                // Stripe Checkout, or the portal if already subscribed
+}
+```
+
+After paying, Stripe sends the visitor to `/helpdesk/?checkout=done`. The questions usually
+arrive within a few seconds; if the counter hasn't moved yet, say "your purchase is being
+confirmed" rather than treating the return itself as proof of payment.
+
+### Not handled automatically
+
+- **Refunds and disputes** alert the owner only. Removing questions is a manual decision.
+- **Sales tax.** Whether to turn on Stripe Tax is the owner's decision; nothing here depends on it.
+- **Allowances reset on the 1st of each calendar month (UTC)**, not on the billing date.
 
 ## Security rules for whoever edits the website side
 
@@ -133,7 +184,9 @@ before calling `grant`, and take the email from the payment record, never from t
 - Take the visitor's address from Netlify (`context.ip`), never from a request header.
 - Render `reply` as text. It is model output grounded in SOPs, and must never be treated as HTML.
 - Don't add a way for the browser to send `account_email`, `visitor_id` or `client_ip`.
-- Don't call `/v1/webchat/grants` from anything a browser can reach.
+- Don't call `/v1/webchat/grants` from anything a browser can reach. Only the Stripe webhook does.
+- The webhook must read the raw request body (`req.text()`): Stripe signs the exact bytes.
+- Never send a price ID, an amount or an email from the browser to Stripe. The server picks all three.
 - The sign-up form answers `{"ok": true}` whether or not the address exists. Keep it that way.
 
 ## What the visitor is told

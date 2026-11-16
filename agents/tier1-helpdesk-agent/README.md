@@ -74,8 +74,9 @@ visitors: 5 free questions, then sign-up and a one-time 10-question trial, then 
 a monthly plan with an allowance. The website's server signs every request; browsers never reach this
 API. Each question is counted in the database before any model call, answered from the chat's own
 tenant and SOPs in sandbox mode (no threads, outage detection, approvals or Tier 2 pages), and
-spends against its own hard monthly budget. Contract, reference website code and the hand-off
-prompt for the website build are in `integrations/website/`.
+spends against its own hard monthly budget. Payments are Stripe Checkout on the website; its signed
+webhook tells this API what was bought, once per payment. Contract, website code (chat, sign-up,
+Stripe) and the hand-off prompt for the website build are in `integrations/website/`.
 
 ## n8n contract
 
@@ -178,7 +179,7 @@ make test-sql   # migration + SQL behaviour checks against a scratch Postgres+pg
 make lint
 cd terraform && terraform test                        # plan-only tests with a mocked AWS provider
 node --test integrations/n8n/test/handlers.test.js   # n8n Code-node logic
-node --test integrations/website/test/helpdesk-core.test.mjs   # website free-trial handler
+node --test integrations/website/test/                   # website free trial: chat, sign-up, Stripe
 python integrations/n8n/test/e2e_n8n.py              # optional: inside real n8n (Node >= 24)
 ```
 

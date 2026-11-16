@@ -13,10 +13,11 @@ Follow it exactly; do not redesign the flow.
 
 **What to build**
 
-1. Copy `netlify/lib/helpdesk-core.mjs` to this site's `netlify/lib/` unchanged, and
-   `netlify/functions/api-helpdesk.mjs` to `netlify/functions/`. It uses this site's existing
+1. Copy `netlify/lib/helpdesk-core.mjs` and `netlify/lib/helpdesk-stripe.mjs` to this site's
+   `netlify/lib/` unchanged, and `netlify/functions/api-helpdesk.mjs` and
+   `api-helpdesk-billing.mjs` to `netlify/functions/`. It uses this site's existing
    helpers in `netlify/lib/common.mjs` (`originOk`, `rateLimit`, `sendEmail`, `emailShell`,
-   `esc`, `store`). Check each import still exists with that name and signature.
+   `esc`, `store`, `alertOwner`). Check each import still exists with that name and signature.
 2. Create `/helpdesk/` (EN/ES like the rest of the site, in the current design system):
    - a short explanation: 5 free questions with no sign-up, 10 more after creating a free account,
      then a $20 credit pack (50 questions) or a monthly plan;
@@ -26,16 +27,24 @@ Follow it exactly; do not redesign the flow.
 3. Create `/helpdesk/plans.html`: credit pack ($20 for 50 questions, never expire), Starter
    ($79/month) and Pro ($149/month), and "need it for your whole team? talk to us". Take the
    monthly question counts from the table in the contract README, and check with the owner
-   before publishing them: they are placeholders. Buttons can be placeholders too: the payment
-   provider hasn't been chosen. Do not invent prices or features beyond these.
+   before publishing them: they are placeholders. Wire the three buttons with the `buy(product)` snippet in the contract
+   (Stripe Checkout), add a "Manage or cancel subscription" link that POSTs to
+   `/api/helpdesk/portal`, and handle `?checkout=done` and `?checkout=cancelled`. Do not invent
+   prices or features beyond these.
 4. In `onSignup` (commented out in `api-helpdesk.mjs`), save the verified sign-up as a lead the
    same way `api-lead.mjs` does, with the consent wording shown on the form.
 5. Link the new page from the home page.
 
 **Rules**
 
-- The four `HELPDESK_*` values are Netlify environment variables. List their names for the
-  owner; never put a value in the repo or in page source.
+- The four `HELPDESK_*` and five `STRIPE_*` values are Netlify environment variables. List their
+  names for the owner; never put a value in the repo or in page source. The owner creates the
+  Stripe products, key and webhook (contract, "One-time Stripe setup"); don't do it for them.
+- Never send a price ID, an amount or an email from the browser. The server chooses all three.
+- Returning from Stripe to `?checkout=done` is not proof of payment. Show "your purchase is being
+  confirmed" and refresh the counter from `/api/helpdesk/me`; only Stripe's webhook grants anything.
+- Add Stripe to the privacy policy as the payment processor, and link the terms that cover
+  subscriptions, cancellation and refunds (attorney review still applies).
 - Render every reply with `textContent`. Never `innerHTML`.
 - The browser must not be able to send `account_email`, `visitor_id` or `client_ip`.
 - Don't add analytics or logging that records what visitors type.
@@ -48,5 +57,6 @@ Follow it exactly; do not redesign the flow.
 
 **Done means**: `npx netlify dev` serves `/helpdesk/`, a question returns an answer once the
 four variables point at a running agent, the sixth anonymous question shows the sign-up form,
-and the README lists the new variables and test steps. Report anything in the contract you
+a test-mode purchase with card 4242 4242 4242 4242 raises the counter by 50, and the README
+lists the new variables and test steps. Report anything in the contract you
 could not follow instead of working around it.

@@ -322,3 +322,34 @@ def test_request_signed_by_the_website_code_is_accepted_by_the_agent(chat):
         tampered = request["body"].replace("203.0.113.7", "203.0.113.8").encode()
         assert client.post("/v1/webchat/message", content=tampered,
                            headers={signing.SIGNATURE_HEADER: request["signature"]}).status_code == 401
+
+
+def test_grants_sent_by_the_websites_stripe_code_are_accepted_by_the_agent(chat):
+    """The exact payloads helpdesk-stripe.mjs sends for a credit pack, a plan and a cancellation."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from app import main
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = Path(__file__).resolve().parents[1] / "integrations" / "website" / "test" / "sign_request.mjs"
+    expected = [
+        ({"grant_id": "cs_live_abc123", "email": "pat@example.com", "plan": None, "add_credits": 50},
+         {"applied": True, "plan": "free", "credits": 60}),  # 10 trial + 50 bought
+        ({"grant_id": "cs_live_sub1", "email": "pat@example.com", "plan": "pro", "add_credits": 0},
+         {"applied": True, "plan": "pro", "credits": 60}),
+        ({"grant_id": "cs_live_abc123", "email": "pat@example.com", "plan": None, "add_credits": 50},
+         {"applied": False, "plan": "pro", "credits": 60}),  # Stripe retried the first event
+        ({"grant_id": "evt_cancelled_1", "email": "pat@example.com", "plan": "free", "add_credits": 0},
+         {"applied": True, "plan": "free", "credits": 60}),  # cancelled: credits are kept
+    ]
+    with TestClient(main.app) as client:
+        for payload, result in expected:
+            request = json.loads(subprocess.run([node, str(script), SECRET, json.dumps(payload)],
+                                                capture_output=True, text=True, check=True, timeout=60).stdout)
+            r = client.post("/v1/webchat/grants", content=request["body"].encode(),
+                            headers={signing.SIGNATURE_HEADER: request["signature"]})
+            assert r.status_code == 200 and r.json() == result, (payload, r.text)
