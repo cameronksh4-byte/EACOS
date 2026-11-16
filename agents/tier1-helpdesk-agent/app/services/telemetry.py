@@ -69,8 +69,9 @@ def log_triage(payload: IncomingTicketWebhook, result: AgentTriageResult, cost_u
     background.spawn(write_event(event), f"telemetry {payload.ticket_id}")
 
 
-async def roi_summary(tenant_id: str, days: int = 30) -> ROISummary:
-    until = datetime.now(timezone.utc)
+async def roi_summary(tenant_id: str, days: int = 30, *, until: datetime | None = None) -> ROISummary:
+    """ROI for the `days` ending at `until` (default: now)."""
+    until = until or datetime.now(timezone.utc)
     since = until - timedelta(days=days)
     rows = await supabase_client.rpc(
         "tenant_roi_summary",

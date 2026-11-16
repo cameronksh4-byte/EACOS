@@ -131,8 +131,54 @@ def test_rendered_file_is_private(tmp_path):
 def test_generated_secrets_are_long_and_distinct(capsys):
     render_config.main(["--generate-secrets"])
     lines = dict(line.split("=", 1) for line in capsys.readouterr().out.strip().splitlines())
-    assert set(lines) == {"WEBHOOK_SECRET", "N8N_OUTBOUND_SIGNING_SECRET", "N8N_CALLBACK_SECRET"}
-    assert all(len(v) >= 40 for v in lines.values()) and len(set(lines.values())) == 3
+    assert set(lines) == {"WEBHOOK_SECRET", "N8N_OUTBOUND_SIGNING_SECRET", "N8N_CALLBACK_SECRET",
+                          "WEBCHAT_SIGNING_SECRET"}
+    assert all(len(v) >= 40 for v in lines.values()) and len(set(lines.values())) == 4
+
+
+@pytest.mark.parametrize("change, expected", [
+    ({"PUBLIC_HOSTNAME": "https://helpdesk.acme.com"}, "PUBLIC_HOSTNAME must be a bare lowercase host name"),
+    ({"PUBLIC_HOSTNAME": "helpdesk.acme.com/x"}, "PUBLIC_HOSTNAME must be a bare lowercase host name"),
+    ({"DESIRED_COUNT": "two"}, "DESIRED_COUNT must be a whole number"),
+    ({"ENABLE_WAF": "on"}, "ENABLE_WAF must be true or false"),
+    ({"SERVICE_TIER": "", "TRIAL_EXPIRES_ON": ""}, "TIER_0 needs TRIAL_EXPIRES_ON"),  # empty tier = Tier 0
+    ({"CONFIDENCE_THRESHHOLD": "0.9"}, "CONFIDENCE_THRESHHOLD isn't a setting"),  # typo caught, not ignored
+    ({"TENANT_ID": "other"}, "TENANT_ID is derived automatically"),
+    ({"WEBCHAT_ENABLED": "true"}, "WEBCHAT_SIGNING_SECRET"),
+    ({"WEBCHAT_ENABLED": "true", "WEBCHAT_SIGNING_SECRET": "x" * 40, "WEBCHAT_TENANT_ID": "acme-corp"},
+     "WEBCHAT_TENANT_ID different from every client tenant"),
+])
+def test_check_rejects_values_that_used_to_slip_through(change, expected):
+    problems = render_config.validate({**TIER0, **change})
+    assert any(expected in p for p in problems), problems
+
+
+def test_every_validated_setting_reaches_the_container():
+    """--check validates with the app's Settings, so whatever it accepts must be forwarded."""
+    cfg = {**TIER0, "CONFIDENCE_THRESHOLD": "0.9", "TRIAGE_MAX_TOKENS": "2048", "OUTAGE_MIN_DISTINCT_REPORTERS": "4",
+           "WEBCHAT_ENABLED": "true", "WEBCHAT_SIGNING_SECRET": "w" * 40, "WEBCHAT_SOP_DIR": "ingest/sample_sops",
+           "WEBCHAT_PLAN_MONTHLY_LIMITS": '{"free": 20, "starter": 250}'}
+    assert render_config.validate(cfg) == []
+    out = render_config.render(cfg, "abc123")
+    env, secrets_ = out["extra_environment"], out["integration_secrets"]
+    assert env["CONFIDENCE_THRESHOLD"] == "0.9" and env["OUTAGE_MIN_DISTINCT_REPORTERS"] == "4"
+    assert env["WEBCHAT_ENABLED"] == "true" and "free" in env["WEBCHAT_PLAN_MONTHLY_LIMITS"]
+    assert secrets_["WEBCHAT_SIGNING_SECRET"] == "w" * 40
+    # Terraform refuses plain environment names that look like secrets (…TOKEN…),
+    # so such settings ride in Secrets Manager instead of being dropped.
+    assert secrets_["TRIAGE_MAX_TOKENS"] == "2048" and "TRIAGE_MAX_TOKENS" not in env
+    assert "WEBCHAT_SOP_DIR" not in env and "WEBCHAT_SOP_DIR" not in secrets_  # deploy-script only
+    for name in env:
+        assert not render_config.SECRET_NAME.search(name), name
+
+
+def test_check_reports_missing_python_packages_as_such(monkeypatch):
+    def boom():
+        raise ImportError("No module named 'pydantic'", name="pydantic")
+
+    monkeypatch.setattr(render_config, "known_keys", boom)
+    problems = render_config.validate(TIER0)
+    assert len(problems) == 1 and "deploy/deploy.sh <your>.env --check" in problems[0], problems
 
 
 # =============================================================================
@@ -420,3 +466,81 @@ def test_deploy_writes_the_n8n_env_file_next_to_the_config(stubbed):
     assert n8n_env.exists() and stat.S_IMODE(n8n_env.stat().st_mode) == 0o600
     assert "N8N_AGENT_SIGNING_SECRET=" + "o" * 40 in n8n_env.read_text()
     assert "o" * 40 not in proc.stdout + proc.stderr  # never printed
+
+
+# =============================================================================
+# Review fixes: first run, rollback, repeat deploys, helper modes
+# =============================================================================
+
+
+def _last_run(calls, marker="buildx inspect"):
+    starts = [i for i, (_, a) in enumerate(calls) if marker in a]
+    return [f"{t} {a}" for t, a in (calls[starts[-1]:] if starts else calls)]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_first_run_plan_works_and_only_creates_the_state_bucket(stubbed):
+    proc, calls, _ = stubbed({**TIER0, "SOP_DIR": ""}, "--plan", stdin="y\n")
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    flat = [f"{t} {a}" for t, a in calls]
+    assert any("s3api create-bucket" in c for c in flat) and any("plan -input=false" in c for c in flat)
+    assert not any("docker buildx build" in c or " apply " in f" {c} " or "ecs wait" in c for c in flat), flat
+    assert "Plan complete" in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_nothing_changes_before_the_operator_agrees(stubbed):
+    """Bucket: yes. 'Go ahead?': no. The schema, ECR and image must all be untouched."""
+    proc, calls, _ = stubbed({**TIER0, "SOP_DIR": ""}, stdin="y\nn\n")
+    assert proc.returncode != 0 and "stopped by user" in proc.stderr
+    flat = [f"{t} {a}" for t, a in calls]
+    assert "About to, in this order" in proc.stdout
+    assert not any("docker buildx build" in c or "ecr-repository" in c or "aws_ecr_repository" in c for c in flat), flat
+    assert not any(" apply " in f" {c} " for c in flat), flat
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_rollback_to_a_tag_that_is_not_in_ecr_stops_instead_of_building(stubbed):
+    proc, calls, _ = stubbed({**TIER0, "SOP_DIR": "", "IMAGE_TAG": "0123456789ab"}, "--yes", "--skip-smoke")
+    assert proc.returncode != 0
+    assert "IMAGE_TAG=0123456789ab isn't in ECR" in proc.stderr
+    flat = [f"{t} {a}" for t, a in calls]
+    assert not any("docker buildx build" in c for c in flat), "built the current tree under the rollback tag"
+    assert not any(c.endswith("/tfplan") for c in flat), "applied infrastructure after a failed rollback"
+
+
+def test_terraform_lock_file_does_not_make_the_tree_dirty():
+    """`terraform init` writes this file on the first deploy. If it counted as a local
+    change, every later deploy would build and roll out a new '-dirty-' image."""
+    ignored = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", "terraform/.terraform.lock.hcl"])
+    assert ignored.returncode == 0, "terraform/.terraform.lock.hcl must be git-ignored"
+    script = (ROOT / "deploy" / "deploy.sh").read_text()
+    assert "':!terraform/.terraform.lock.hcl'" in script
+
+
+def test_smoke_test_secret_is_not_passed_on_the_command_line():
+    script = (ROOT / "deploy" / "deploy.sh").read_text()
+    assert 'SMOKE_WEBHOOK_SECRET="$(cfg WEBHOOK_SECRET)"' in script
+    assert "--secret" not in script.split('bold "8/8 Smoke test"', 1)[1].replace("--secret ...", "")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_check_mode_validates_without_aws_terraform_or_docker(stubbed):
+    proc, calls, _ = stubbed({**TIER0, "SOP_DIR": ""}, "--check")
+    assert proc.returncode == 0 and "deploy.env ok" in proc.stdout, proc.stdout + proc.stderr
+    assert calls == [], calls
+    proc, calls, _ = stubbed({**TIER0, "PUBLIC_HOSTNAME": "https://helpdesk.acme.com"}, "--check")
+    assert proc.returncode != 0 and "bare lowercase host name" in proc.stderr and calls == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_sync_sops_mode_needs_no_aws_and_says_when_there_is_nothing_to_load(stubbed):
+    proc, calls, _ = stubbed({**TIER0, "SOP_DIR": ""}, "--sync-sops", "--prune")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "nothing to load" in proc.stdout and calls == []
+
+
+def test_smoke_test_expectations_follow_disabled_features_and_webchat():
+    source = (ROOT / "deploy" / "smoke_test.py").read_text()
+    assert '"manager_approvals" not in disabled' in source and '"roi_telemetry" in disabled' in source
+    assert "/v1/webchat/message" in source

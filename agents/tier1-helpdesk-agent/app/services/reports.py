@@ -57,25 +57,13 @@ async def _count(table: str, filters: dict[str, str]) -> int:
 
 @gated(Feature.EXECUTIVE_REPORTS, default=None)
 async def weekly_report(tenant_id: str, deliver: bool = True) -> WeeklyReport | None:
-    roi = await telemetry.roi_summary(tenant_id, days=7)
-    two_weeks = await telemetry.roi_summary(tenant_id, days=14)
-    # Previous week = the 14-day window minus this week (counts are additive per ticket).
-    prev = ROISummary(
-        tenant_id=tenant_id,
-        period_start=two_weeks.period_start,
-        period_end=roi.period_start,
-        unique_tickets=max(0, two_weeks.unique_tickets - roi.unique_tickets),
-        total_triages=max(0, two_weeks.total_triages - roi.total_triages),
-        deflected_tickets=max(0, two_weeks.deflected_tickets - roi.deflected_tickets),
-        deflection_rate_pct=0.0,
-        total_hours_saved=max(0.0, round(two_weeks.total_hours_saved - roi.total_hours_saved, 2)),
-        token_cost_usd=max(0.0, round(two_weeks.token_cost_usd - roi.token_cost_usd, 4)),
-        outage_tickets=max(0, two_weeks.outage_tickets - roi.outage_tickets),
-    )
-    if prev.unique_tickets:
-        prev = prev.model_copy(update={"deflection_rate_pct": round(100 * prev.deflected_tickets / prev.unique_tickets, 1)})
+    now = datetime.now(timezone.utc)
+    roi = await telemetry.roi_summary(tenant_id, days=7, until=now)
+    # The previous week is queried as its own window. (Subtracting this week
+    # from a 14-day total is wrong: unique tickets and rates aren't additive.)
+    prev = await telemetry.roi_summary(tenant_id, days=7, until=now - timedelta(days=7))
 
-    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    since = (now - timedelta(days=7)).isoformat()
     drafts = await _count("sop_drafts", {"tenant_id": supabase_client.eq(tenant_id), "status": "eq.draft_pending_review"})
     outages = await _count("outage_incidents", {"tenant_id": supabase_client.eq(tenant_id),
                                                 "first_seen_at": f"gte.{since}"})

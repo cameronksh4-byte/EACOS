@@ -21,6 +21,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -93,8 +94,17 @@ def choose_os_platform(hardware: list[HardwareAsset], vision_hint: OSPlatform = 
 
 
 def is_vip(job_title: str | None) -> bool:
-    title = f" {(job_title or '').lower()} "
-    return any(f" {kw} " in title or title.strip().startswith(kw) for kw in get_settings().vip_job_title_keywords)
+    """Whole-word, case-insensitive keyword match ("VP, Sales" yes; "Chiefly" or "Supervisor" no)."""
+    title = (job_title or "").lower()
+    return any(
+        kw and re.search(rf"(?<![a-z0-9]){re.escape(kw.lower())}(?![a-z0-9])", title)
+        for kw in get_settings().vip_job_title_keywords
+    )
+
+
+def _path(value: str) -> str:
+    """A user identifier as one URL path segment (no '/', '?', '#' or '%' smuggling)."""
+    return quote(value, safe="@")
 
 
 def _odata_literal(value: str) -> str:
@@ -115,7 +125,10 @@ class IdentityProvider(Protocol):
 class DirectoryCacheProvider:
     name = "directory_cache"
 
-    async def lookup(self, tenant_id: str, email: str) -> UserContext | None:
+    async def lookup(self, tenant_id: str, email: str, *, live_max_age_hours: int | None = None) -> UserContext | None:
+        """live_max_age_hours: when set, a row written by a live provider longer ago
+        than this is stale: its manager (who would approve requests) and sign-in
+        failures are not trusted. Rows loaded by the operator don't expire."""
         rows = await supabase_client.select(
             "tenant_directory",
             {"tenant_id": supabase_client.eq(tenant_id), "email": supabase_client.eq(email)},
@@ -124,6 +137,9 @@ class DirectoryCacheProvider:
         if not rows:
             return None
         row = rows[0]
+        if live_max_age_hours is not None and row.get("source") in ("microsoft_graph", "okta") and _older_than(
+                row.get("synced_at"), live_max_age_hours):
+            row = {**row, "manager_email": None, "recent_auth_failures": 0}
         hardware = [HardwareAsset.model_validate(h) for h in (row.get("assigned_hardware") or [])][:20]
         os_platform = OSPlatform(row.get("os_platform") or "unknown")
         if os_platform is OSPlatform.UNKNOWN:
@@ -181,14 +197,20 @@ class MicrosoftGraphProvider:
         resp.raise_for_status()
         return resp.json()
 
+    async def email_for_object_id(self, object_id: str) -> str | None:
+        """A user's mailbox address from their Entra object ID (Teams only sends the ID)."""
+        user = await self._get(f"/users/{_path(object_id)}", {"$select": "mail,userPrincipalName"})
+        address = ((user or {}).get("mail") or (user or {}).get("userPrincipalName") or "").lower()
+        return address if _EMAIL.match(address) else None
+
     async def lookup(self, tenant_id: str, email: str) -> UserContext | None:
-        user = await self._get(f"/users/{email}", {"$select": "id,mail,department,jobTitle"})
+        user = await self._get(f"/users/{_path(email)}", {"$select": "id,mail,department,jobTitle"})
         if user is None:
             return None
         lit = _odata_literal(email)
         since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
         manager, devices, signins = await asyncio.gather(
-            self._get(f"/users/{email}/manager", {"$select": "mail"}),
+            self._get(f"/users/{_path(email)}/manager", {"$select": "mail"}),
             self._get("/deviceManagement/managedDevices", {
                 "$filter": f"userPrincipalName eq '{lit}'",
                 "$select": "deviceName,model,operatingSystem,osVersion,complianceState,lastSyncDateTime",
@@ -245,7 +267,7 @@ class OktaProvider:
         return resp.json()
 
     async def lookup(self, tenant_id: str, email: str) -> UserContext | None:
-        user = await self._get(f"/api/v1/users/{email}")
+        user = await self._get(f"/api/v1/users/{_path(email)}")
         if user is None:
             return None
         profile = user.get("profile", {})
@@ -254,12 +276,23 @@ class OktaProvider:
             logs = await self._get("/api/v1/logs", {
                 "since": since,
                 "filter": f'eventType eq "user.session.start" and outcome.result eq "FAILURE" '
-                          f'and actor.alternateId eq "{email}"',
+                          f'and actor.alternateId eq "{email.replace(chr(34), "")}"',
                 "limit": "50",
             })
         except httpx.HTTPError:
             logs = []
-        manager = (profile.get("managerEmail") or profile.get("manager") or "").lower()
+        manager = str(profile.get("managerEmail") or profile.get("manager") or "").lower()
+        manager_id = str(profile.get("managerId") or "").strip()
+        if not _EMAIL.match(manager) and manager_id:
+            # Okta's standard profile stores the manager as an ID or login, not an email.
+            if _EMAIL.match(manager_id.lower()):
+                manager = manager_id.lower()
+            else:
+                try:
+                    boss = await self._get(f"/api/v1/users/{_path(manager_id)}")
+                    manager = str(((boss or {}).get("profile") or {}).get("email") or "").lower()
+                except httpx.HTTPError:
+                    manager = ""
         return UserContext(
             email=email,
             department=profile.get("department"),
@@ -309,6 +342,53 @@ def _unavailable(email: str) -> UserContext:
     return UserContext(email=email, source="unavailable")
 
 
+def _older_than(timestamp: Any, hours: int) -> bool:
+    try:
+        when = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - when > timedelta(hours=hours)
+
+
+def _merge(live: UserContext, cached: UserContext | None) -> UserContext:
+    """Fill what the live provider doesn't know from the directory row.
+
+    Okta has no device inventory, and not every directory exposes a manager:
+    a live lookup must add to the operator-loaded directory, never blank it.
+    """
+    if cached is None:
+        return live
+    hardware = live.assigned_hardware or cached.assigned_hardware
+    os_platform = live.os_platform
+    if os_platform is OSPlatform.UNKNOWN:
+        os_platform = cached.os_platform if cached.os_platform is not OSPlatform.UNKNOWN else choose_os_platform(hardware)
+    return live.model_copy(update={
+        "assigned_hardware": hardware,
+        "os_platform": os_platform,
+        "department": live.department or cached.department,
+        "manager_email": live.manager_email or cached.manager_email,
+        "vip_status": live.vip_status or cached.vip_status,
+    })
+
+
+async def resolve_teams_email(aad_object_id: str) -> str | None:
+    """Teams identifies the sender by Entra object ID. Look up their address when Graph is configured. Never raises."""
+    settings = get_settings()
+    if (not settings.feature_enabled(Feature.CONTEXT_ENRICHMENT)
+            or settings.identity_provider is not IdentityProviderKind.MICROSOFT_GRAPH
+            or not re.fullmatch(r"[0-9a-fA-F-]{36}", aad_object_id or "")):
+        return None
+    provider = live_provider()
+    try:
+        return await asyncio.wait_for(
+            provider.email_for_object_id(aad_object_id), settings.identity_lookup_timeout_seconds)  # type: ignore[union-attr]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("teams sender lookup failed err=%s", type(exc).__name__)
+        return None
+
+
 @gated(Feature.CONTEXT_ENRICHMENT, default=None)
 async def enrich(tenant_id: str, email: str, vision: VisionContext | None = None) -> UserContext | None:
     """UserContext for the reporter (Tier 1+). Never raises."""
@@ -317,19 +397,25 @@ async def enrich(tenant_id: str, email: str, vision: VisionContext | None = None
     settings = get_settings()
     ctx: UserContext | None = None
     provider = live_provider()
+    cached: UserContext | None = None
+    try:
+        # With a live provider, rows it wrote expire (DIRECTORY_CACHE_TTL_HOURS).
+        cached = await _cache_provider.lookup(
+            tenant_id, email,
+            live_max_age_hours=settings.directory_cache_ttl_hours if provider is not None else None)
+    except Exception:  # noqa: BLE001
+        logger.warning("directory cache lookup failed tenant=%s", tenant_id)
     if provider is not None:
         try:
             ctx = await asyncio.wait_for(provider.lookup(tenant_id, email), settings.identity_lookup_timeout_seconds)
             if ctx is not None:
+                ctx = _merge(ctx, cached)
                 await _write_through(tenant_id, ctx)
         except Exception as exc:  # noqa: BLE001
             logger.warning("identity lookup failed provider=%s err=%s; using cache", provider.name, type(exc).__name__)
             ctx = None
     if ctx is None:
-        try:
-            ctx = await _cache_provider.lookup(tenant_id, email)
-        except Exception:  # noqa: BLE001
-            logger.warning("directory cache lookup failed tenant=%s", tenant_id)
+        ctx = cached
     if ctx is None:
         return _unavailable(email)
 

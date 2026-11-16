@@ -13,7 +13,8 @@
     [T1] ASK_CLARIFICATION   -> spend a DB-capped question, or escalate at the cap
     [T1] software/hardware   -> catalog -> provision | approval card via n8n | escalate
     deterministic guardrails + schema validator (guardrail #2 and its exemptions)
-    [T1] persist the turn and slots; notify Tier 2 on escalation
+    [T1] persist the turn and slots
+    notify Tier 2 whenever the result requires escalation (every channel)
     telemetry (background)
 
 Each [T1] step is behind a tier gate (`@gated` or `feature_enabled`), so a
@@ -28,6 +29,7 @@ import time
 from uuid import UUID
 
 from app.config import Feature, Settings, get_settings
+from app.services import notifier
 from app.schemas.ticket import (
     AgentTriageResult,
     IncomingTicketWebhook,
@@ -55,24 +57,45 @@ from app.services import (
 logger = logging.getLogger(__name__)
 
 
-async def process_ticket(payload: IncomingTicketWebhook) -> AgentTriageResult:
+async def process_ticket(payload: IncomingTicketWebhook, *, sandbox: bool = False) -> AgentTriageResult:
+    """Triage one ticket.
+
+    sandbox=True is the public website chat: the same grounded answer and
+    guardrails, but nothing with side effects. No thread, no outage detection,
+    no screenshots, no identity lookups, no approvals or provisioning, and
+    nobody is paged (there is no technician behind an anonymous visitor).
+    """
     settings = get_settings()
     started = time.monotonic()
     ledger = llm_client.CostLedger()
 
     state: conversation.ThreadState | None = None
-    if conversation.multi_turn_enabled(payload):
+    if not sandbox and conversation.multi_turn_enabled(payload):
         try:
             state = await conversation.load(payload)
         except Exception:  # noqa: BLE001
             logger.exception("conversation load failed ticket=%s; continuing single-turn", payload.ticket_id)
 
-    result, slots = await _triage(payload, settings, ledger, state)
+    if not settings.feature_enabled(Feature.TRIAGE_AND_DRAFT):
+        # Kill switch: every channel (API and chat webhooks) hands the ticket to a human.
+        result, slots = guardrails.unavailable_result(payload, settings, "automatic triage is switched off"), {}
+    else:
+        try:
+            result, slots = await _triage(payload, settings, ledger, state, sandbox)
+        except Exception:  # noqa: BLE001
+            # Nothing in triage may crash a ticket: degrade toward a human.
+            logger.exception("triage failed ticket=%s", payload.ticket_id)
+            result, slots = guardrails.unavailable_result(payload, settings, "internal error during triage"), (
+                dict(state.slots) if state else {})
 
     if state is not None:
         background.spawn(_persist_turn(state, payload, result, slots), f"conversation {state.thread_id}")
+    elif result.requires_tier2_escalation and not sandbox:
+        # No thread to track (single-turn, or the thread store was unreachable):
+        # tell Tier 2 directly so the escalation can't be lost.
+        background.spawn(_notify_untracked(payload, result), f"escalation {payload.ticket_id}")
     # Only in-scope IT categories can later mark a cluster as an outage.
-    if (not result.active_outage_detected and result.scope is ScopeVerdict.IN_SCOPE
+    if (not sandbox and not result.active_outage_detected and result.scope is ScopeVerdict.IN_SCOPE
             and result.category is not TicketCategory.UNKNOWN):
         background.spawn(
             outage.record_category(payload.tenant_id, payload.ticket_id, result.category),
@@ -91,12 +114,50 @@ async def process_ticket(payload: IncomingTicketWebhook) -> AgentTriageResult:
 async def _persist_turn(state: conversation.ThreadState, payload: IncomingTicketWebhook,
                         result: AgentTriageResult, slots: dict[str, str]) -> None:
     was_escalated = state.status == "escalated"
-    await conversation.record_turn(state, payload, result, slots)
-    if result.action is TriageAction.ESCALATE_TIER_2:
-        reason = "requester added information" if was_escalated else (
-            ", ".join(result.guardrail_overrides) or "agent escalation")
+    try:
+        await conversation.record_turn(state, payload, result, slots)
+    except Exception:  # noqa: BLE001
+        # The notice below must still go out when the thread can't be saved.
+        logger.exception("recording turn failed thread=%s", state.thread_id)
+    # Any result that requires Tier 2 is notified, not only ESCALATE_TIER_2
+    # (a security report with a clarifying question also needs a human now).
+    if result.requires_tier2_escalation:
+        reason = "requester added information" if was_escalated else escalation_reason(result)
         await conversation.notify_escalation(state.tenant_id, state.thread_id, payload.ticket_id, reason,
-                                             details=result.internal_tech_notes)
+                                             details=escalation_summary(payload, result))
+
+
+async def _notify_untracked(payload: IncomingTicketWebhook, result: AgentTriageResult) -> None:
+    if not get_settings().tier2_channel_configured():
+        return  # the caller (API client, Jira comment, ...) owns the handoff
+    await notifier.notify_tier2(
+        "thread.escalated", payload.tenant_id,
+        {"thread_id": payload.thread_id, "ticket_id": payload.ticket_id,
+         "reason": escalation_reason(result), "notes": escalation_summary(payload, result)},
+        f"Tier 2 escalation for {payload.tenant_id}: ticket {payload.ticket_id}. "
+        f"Reason: {escalation_reason(result)}.\n{escalation_summary(payload, result)}",
+    )
+
+
+def escalation_reason(result: AgentTriageResult) -> str:
+    if result.guardrail_overrides:
+        return ", ".join(result.guardrail_overrides)
+    if result.category is TicketCategory.SECURITY_INCIDENT:
+        return "security_incident"
+    return "agent escalation"
+
+
+def escalation_summary(payload: IncomingTicketWebhook, result: AgentTriageResult) -> str:
+    """Technician-facing summary. Requester text is included as data, never as markup."""
+    return (
+        f"Ticket {payload.ticket_id} ({payload.source_system})\n"
+        f"Reporter: {payload.reporter_email}\n"
+        f"Scope: {result.scope.value} | Category: {result.category.value} | "
+        f"Severity: {result.severity.value} | Confidence: {result.confidence_score:.2f}\n"
+        f"Subject: {payload.subject[:300]}\n"
+        f"Cited SOPs: {', '.join(result.cited_sop_ids) or 'none'}\n"
+        f"Notes: {(result.internal_tech_notes or '-')[:1500]}"
+    )
 
 
 async def _pending_approval(state: conversation.ThreadState) -> dict | None:
@@ -114,9 +175,10 @@ async def _triage(
     settings: Settings,
     ledger: llm_client.CostLedger,
     state: conversation.ThreadState | None,
+    sandbox: bool = False,
 ) -> tuple[AgentTriageResult, dict[str, str]]:
     slots = dict(state.slots) if state else {}
-    if settings.trial_expired():
+    if settings.trial_expired() and not sandbox:
         return guardrails.unavailable_result(payload, settings, "trial period ended"), slots
 
     # [T1] Threads that aren't the agent's to answer get a fixed status reply.
@@ -142,7 +204,7 @@ async def _triage(
 
     # 2. Outage burst detection: new conversations only (a reply like "Windows 11"
     #    must never look like a burst), before any SOP lookup or model call.
-    if embedding is not None and not follow_up:
+    if embedding is not None and not follow_up and not sandbox:
         try:
             burst = await outage.record_and_detect(payload, embedding, summary=payload.subject)
         except Exception:  # noqa: BLE001
@@ -154,7 +216,7 @@ async def _triage(
 
     # 3. Screenshots: exact error codes and dialog text, before retrieval.
     try:
-        screenshots = await vision.analyze_attachments(payload, ledger)
+        screenshots = None if sandbox else await vision.analyze_attachments(payload, ledger)
     except (llm_client.BudgetExceededError, llm_client.BudgetUnavailableError) as exc:
         return guardrails.unavailable_result(payload, settings, _budget_reason(exc)), slots
     if screenshots and screenshots.extractions:
@@ -164,7 +226,7 @@ async def _triage(
             logger.exception("re-embedding with screenshot findings failed ticket=%s", payload.ticket_id)
 
     # 4. [T1] Live identity/MDM context -> deterministic OS filter.
-    user_ctx: UserContext | None = await context_enrichment.enrich(
+    user_ctx: UserContext | None = None if sandbox else await context_enrichment.enrich(
         payload.tenant_id, payload.reporter_email, screenshots)
     platform = user_ctx.sop_platform_filter if user_ctx is not None else None
     os_filter = platform.value if platform is not None else None
@@ -213,8 +275,14 @@ async def _triage(
             draft.category is TicketCategory.SOFTWARE_ACCESS and draft.requested_item.strip()
             and draft.action is not TriageAction.ASK_CLARIFICATION)
         if wants_item and draft.category is not TicketCategory.SECURITY_INCIDENT:
-            if settings.feature_enabled(Feature.MANAGER_APPROVALS) and draft.requested_item.strip():
-                plan = await approvals.plan_request(payload, draft.requested_item, user_ctx, payload.body)
+            if sandbox:
+                draft = _with(draft, action=TriageAction.ESCALATE_TIER_2,
+                              note="Software and hardware requests aren't processed in the website chat.")
+            elif settings.feature_enabled(Feature.MANAGER_APPROVALS) and draft.requested_item.strip():
+                plan = await approvals.plan_request(
+                    payload, draft.requested_item, user_ctx, payload.body,
+                    # Nothing is provisioned automatically on a low-confidence reading.
+                    allow_auto_provision=draft.confidence_score >= settings.confidence_threshold)
                 draft = _with(draft, action=plan.action, note=plan.note)
                 if plan.action is TriageAction.AWAIT_MANAGER_APPROVAL and plan.item:
                     approval_id, item_name = plan.approval_id, plan.item.display_name

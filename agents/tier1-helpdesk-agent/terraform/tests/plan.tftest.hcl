@@ -105,6 +105,8 @@ run "tier1_with_n8n" {
       SLACK_ESCALATION_CHANNEL = "C-ESC"
       N8N_APPROVAL_WEBHOOK_URL = "https://n8n.acme.com/webhook/approvals"
       IDENTITY_PROVIDER        = "microsoft_graph"
+      GRAPH_TENANT_ID          = "00000000-0000-0000-0000-000000000001"
+      GRAPH_CLIENT_ID          = "00000000-0000-0000-0000-000000000002"
     }
     integration_secrets = {
       SLACK_BOT_TOKEN             = "xoxb"
@@ -120,6 +122,97 @@ run "tier1_with_n8n" {
   assert {
     condition     = local.environment["IDENTITY_PROVIDER"] == "microsoft_graph"
     error_message = "extra_environment not passed through"
+  }
+}
+
+run "graph_identity_needs_all_three_settings" {
+  command = plan
+  variables {
+    service_tier = "TIER_1_PRODUCTION"
+    extra_environment = {
+      SLACK_ESCALATION_CHANNEL = "C-ESC"
+      N8N_APPROVAL_WEBHOOK_URL = "https://n8n.acme.com/webhook/approvals"
+      IDENTITY_PROVIDER        = "microsoft_graph"
+    }
+    integration_secrets = {
+      SLACK_BOT_TOKEN             = "xoxb"
+      N8N_OUTBOUND_SIGNING_SECRET = "out"
+      N8N_CALLBACK_SECRET         = "in"
+      GRAPH_CLIENT_SECRET         = "graph"
+    }
+  }
+  expect_failures = [aws_ecs_task_definition.agent_task]
+}
+
+run "okta_identity_needs_domain_and_token" {
+  command = plan
+  variables {
+    service_tier = "TIER_1_PRODUCTION"
+    extra_environment = {
+      SLACK_ESCALATION_CHANNEL = "C-ESC"
+      N8N_APPROVAL_WEBHOOK_URL = "https://n8n.acme.com/webhook/approvals"
+      IDENTITY_PROVIDER        = "okta"
+      OKTA_DOMAIN              = "acme.okta.com"
+    }
+    integration_secrets = {
+      SLACK_BOT_TOKEN             = "xoxb"
+      N8N_OUTBOUND_SIGNING_SECRET = "out"
+      N8N_CALLBACK_SECRET         = "in"
+    }
+  }
+  expect_failures = [aws_ecs_task_definition.agent_task]
+}
+
+run "tier1_threads_need_a_tier2_channel_even_without_outage_detection" {
+  command = plan
+  variables {
+    service_tier      = "TIER_1_PRODUCTION"
+    disabled_features = ["outage_detection"]
+    extra_environment = { N8N_APPROVAL_WEBHOOK_URL = "https://n8n.acme.com/webhook/approvals" }
+    integration_secrets = {
+      N8N_OUTBOUND_SIGNING_SECRET = "out"
+      N8N_CALLBACK_SECRET         = "in"
+    }
+  }
+  expect_failures = [aws_ecs_task_definition.agent_task]
+}
+
+run "unknown_disabled_feature_rejected" {
+  command = plan
+  variables {
+    disabled_features = ["outage-detection"]
+  }
+  expect_failures = [var.disabled_features]
+}
+
+run "nineteen_character_slug_gives_valid_load_balancer_names" {
+  command = plan
+  variables {
+    client_slug = "abcdefghij-klmnopqr"
+  }
+  assert {
+    condition     = !endswith(aws_lb.agent.name, "-") && !endswith(aws_lb_target_group.agent.name, "-")
+    error_message = "load balancer or target group name ends with a dash"
+  }
+}
+
+run "webchat_needs_its_signing_secret" {
+  command = plan
+  variables {
+    extra_environment = { SLACK_ESCALATION_CHANNEL = "C-ESC", WEBCHAT_ENABLED = "true" }
+  }
+  expect_failures = [aws_ecs_task_definition.agent_task]
+}
+
+run "webchat_with_secret_plans" {
+  command = plan
+  variables {
+    extra_environment   = { SLACK_ESCALATION_CHANNEL = "C-ESC", WEBCHAT_ENABLED = "true", WEBCHAT_TENANT_ID = "web-demo" }
+    integration_secrets = { SLACK_BOT_TOKEN = "xoxb-test", WEBCHAT_SIGNING_SECRET = "0123456789abcdef0123456789abcdef" }
+  }
+  assert {
+    condition     = local.environment["WEBCHAT_ENABLED"] == "true"
+    error_message = "webchat setting not passed through"
   }
 }
 

@@ -67,16 +67,35 @@ begin
             from match_recent_tickets('acme', pg_temp.axis(1), 30, 0.88, 'NEW')) = array['vpn_network'],
         'category not returned for cluster inheritance';
 
-    select * into r1 from register_outage_cluster('acme', 'NEW', matched, 'VPN outage');
+    update recent_tickets set reporter_email = 'pat@acme.com' where tenant_id = 'acme' and ticket_id = 'T1';
+    assert (select count(*) from match_recent_tickets('acme', pg_temp.axis(1), 30, 0.88, 'NEW')
+            where reporter_email = 'pat@acme.com') = 1, 'reporter not returned (one person must not be a burst)';
+
+    select * into r1 from register_outage_cluster('acme', 'NEW', matched, 'VPN outage', 'vpn_network');
     assert r1.incident_id is not null and r1.is_new and r1.needs_tier2_notification;
+    assert (select category from outage_incidents where incident_id = r1.incident_id) = 'vpn_network';
     assert (select ticket_count from outage_incidents where incident_id = r1.incident_id) = 6, 'ticket_count wrong';
 
     -- A later ticket joins the same active incident instead of opening a new one.
     insert into recent_tickets (tenant_id, ticket_id, summary, embedding) values ('acme', 'NEW2', 'VPN', pg_temp.axis(1));
     select * into r2 from register_outage_cluster('acme', 'NEW2', array['T1','NEW'], 'VPN outage again');
     assert r2.incident_id = r1.incident_id and not r2.is_new, 'second burst opened a duplicate incident';
-    assert r2.needs_tier2_notification, 'notification flag cleared before delivery';
+    -- The first caller holds the notification lease: the burst sends one notice, not one per ticket.
+    assert not r2.needs_tier2_notification, 'a second ticket in the burst would notify again';
+    assert (select count(*) from claim_pending_outage_notifications('acme')) = 0, 'retry raced the first notice';
+    -- Once the lease lapses without delivery, exactly one retry claims it.
+    update outage_incidents set tier2_notify_claimed_at = now() - interval '5 minutes';
+    assert (select count(*) from claim_pending_outage_notifications('globex')) = 0, 'cross-tenant claim';
+    assert (select category from claim_pending_outage_notifications('acme')) = 'vpn_network', 'retry lost the category';
+    assert (select count(*) from claim_pending_outage_notifications('acme')) = 0, 'claimed twice';
     assert (select count(*) from outage_incidents where tenant_id = 'acme') = 1;
+
+    -- Housekeeping never closes an incident Tier 2 hasn't been told about.
+    update outage_incidents set last_seen_at = now() - interval '7 hours';
+    perform run_housekeeping();
+    assert (select status from outage_incidents where incident_id = r1.incident_id) = 'active',
+        'unnotified incident was silently resolved';
+    update outage_incidents set last_seen_at = now();
 
     -- Exemption control: Tier 2 is told exactly once; other tenants can't mark it.
     assert not mark_outage_tier2_notified('globex', r1.incident_id), 'cross-tenant mark';
@@ -104,9 +123,10 @@ begin
 
     -- Freed headroom is reusable.
     assert try_reserve_llm_budget('acme', 'T3', 'triage', 0.40, 1.00) is not null;
-    -- Stale reservations (crashed task) stop counting after 15 minutes.
+    -- An unsettled reservation keeps counting, however old: the ledger may
+    -- over-count after a crash, but spend is never lost from the cap.
     update llm_usage set created_at = now() - interval '20 minutes' where id = r2;
-    assert tenant_month_spend('acme') = 0.41, format('stale reservation still counted: %s', tenant_month_spend('acme'));
+    assert tenant_month_spend('acme') = 0.81, format('unsettled reservation dropped: %s', tenant_month_spend('acme'));
 end $$;
 
 -- ---------------------------------------------------------------------------
@@ -275,7 +295,104 @@ begin
     select * into t from conversation_threads where tenant_id = 'acme' and thread_id = 'TH1';
     assert t.status = 'escalated' and t.last_action = 'ESCALATE_TIER_2', format('thread not escalated: %s', t.status);
     assert t.escalation_reason = 'approval_expired' and t.escalation_notified_at is null;
+
+    -- A thread Tier 2 was already told about owes a NEW notice when it escalates again.
+    update conversation_threads set status = 'awaiting_approval', escalation_notified_at = now()
+     where tenant_id = 'acme' and thread_id = 'TH1';
+    update approval_requests set status = 'pending', expires_at = now() - interval '1 minute';
+    perform run_housekeeping();
+    select * into t from conversation_threads where tenant_id = 'acme' and thread_id = 'TH1';
+    assert t.status = 'escalated' and t.escalation_notified_at is null, 'second escalation would never be notified';
 end $$;
+
+-- ---------------------------------------------------------------------------
+-- Maintenance lease: one holder at a time
+-- ---------------------------------------------------------------------------
+do $$
+begin
+    assert try_acquire_maintenance_lease('tick', 50), 'first worker did not get the lease';
+    assert not try_acquire_maintenance_lease('tick', 50), 'two workers hold the lease';
+    update maintenance_leases set expires_at = now() - interval '1 second' where name = 'tick';
+    assert try_acquire_maintenance_lease('tick', 50), 'expired lease not reusable';
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- Website chat: 5 free questions, then sign-up; plan allowance, then credits
+-- ---------------------------------------------------------------------------
+do $$
+declare
+    r record;
+    v text := 'visitor-0123456789abcdef';
+    ip text := repeat('a', 64);
+    limits jsonb := '{"free": 2, "starter": 3}';
+begin
+    for i in 1..5 loop
+        select * into r from webchat_consume(v, ip, null, 5, 15, limits);
+        assert r.allowed and r.charged = 'trial' and r.used = i, format('free question %s refused', i);
+    end loop;
+    select * into r from webchat_consume(v, ip, null, 5, 15, limits);
+    assert not r.allowed and r.reason = 'signup_required', 'sixth anonymous question allowed';
+    assert (select uses from webchat_visitors where visitor_id = v) = 5, 'a refused question was counted';
+
+    -- Clearing cookies (a new visitor id) from the same network: capped per day.
+    for i in 1..10 loop
+        perform webchat_consume('visitor-fresh-' || lpad(i::text, 8, '0'), ip, null, 5, 15, limits);
+    end loop;
+    select * into r from webchat_consume('visitor-another-00000001', ip, null, 5, 15, limits);
+    assert not r.allowed and r.reason = 'signup_required', 'per-network daily cap not enforced';
+
+    -- A failed answer gives the question back.
+    perform webchat_refund(v, ip, null, 'trial');
+    assert (select uses from webchat_visitors where visitor_id = v) = 4;
+
+    -- Signed up (free plan): monthly allowance, then refused until they upgrade or buy credits.
+    select * into r from webchat_consume(v, ip, 'Pat@Example.com', 5, 15, limits);
+    assert r.allowed and r.charged = 'allowance' and r.plan = 'free' and r.used = 1;
+    perform webchat_consume(v, ip, 'pat@example.com', 5, 15, limits);
+    select * into r from webchat_consume(v, ip, 'pat@example.com', 5, 15, limits);
+    assert not r.allowed and r.reason = 'plan_limit', 'free allowance not enforced';
+
+    -- Credits: granted once per payment id, spent only after the allowance.
+    select * into r from webchat_apply_grant('pay_0001', 'pat@example.com', null, 2);
+    assert r.applied and r.credits = 2;
+    select * into r from webchat_apply_grant('pay_0001', 'pat@example.com', null, 2);
+    assert not r.applied and r.credits = 2, 'replayed payment granted credits twice';
+    select * into r from webchat_consume(v, ip, 'pat@example.com', 5, 15, limits);
+    assert r.allowed and r.charged = 'credit' and r.credits = 1;
+    perform webchat_refund(v, ip, 'pat@example.com', 'credit');
+    assert (select credits from webchat_accounts where email = 'pat@example.com') = 2;
+
+    -- Upgrade: the bigger allowance applies at once; credits are kept for later.
+    select * into r from webchat_apply_grant('pay_0002', 'pat@example.com', 'starter', 0);
+    assert r.applied and r.plan = 'starter';
+    select * into r from webchat_consume(v, ip, 'pat@example.com', 5, 15, limits);
+    assert r.allowed and r.charged = 'allowance' and r.used = 3 and r.credits = 2;
+
+    -- A new month resets the allowance, not the credits. An unknown plan gets nothing.
+    update webchat_accounts set period_start = period_start - 31 where email = 'pat@example.com';
+    select * into r from webchat_consume(v, ip, 'pat@example.com', 5, 15, limits);
+    assert r.allowed and r.charged = 'allowance' and r.used = 1, 'allowance did not reset with the month';
+    update webchat_accounts set plan = 'mystery', credits = 0 where email = 'pat@example.com';
+    select * into r from webchat_consume(v, ip, 'pat@example.com', 5, 15, limits);
+    assert not r.allowed and r.reason = 'plan_limit', 'unknown plan was given an allowance';
+end $$;
+
+-- The website tables are service-role only.
+set local role authenticated;
+do $$
+begin
+    begin
+        perform count(*) from webchat_accounts;
+        raise exception 'authenticated could read webchat_accounts';
+    exception when insufficient_privilege then null;
+    end;
+    begin
+        perform webchat_apply_grant('pay_evil_0001', 'eve@example.com', 'managed', 99999);
+        raise exception 'authenticated could grant itself credits';
+    exception when insufficient_privilege then null;
+    end;
+end $$;
+reset role;
 
 \echo 'ALL SCHEMA CHECKS PASSED'
 rollback;

@@ -55,7 +55,19 @@ def chain(*names: str) -> dict:
     return {a: {"main": [[{"node": b, "type": "main", "index": 0}]]} for a, b in itertools.pairwise(names)}
 
 
-def webhook_workflow(name: str, path: str, verify_src: str, handler_src: str, description: str) -> dict:
+def webhook_workflow(name: str, path: str, verify_src: str, handler_src: str, description: str,
+                     *, respond_first: bool = False) -> dict:
+    """Webhook -> Verify -> Handle -> Respond.
+
+    The agent treats a 2xx from n8n as "delivered" (it stops retrying, and marks
+    outage incidents and escalations as notified), so the response is sent only
+    after the handler finished: 200 on success, 502 if Slack or the directory
+    refused. respond_first=True is for Slack's own interactivity webhook, which
+    must be acknowledged within 3 seconds, before the work is done.
+    """
+    order = (["Webhook", "Verify signature", "Respond", "Handle"] if respond_first
+             else ["Webhook", "Verify signature", "Handle", "Respond"])
+    x = {name_: 240 * i for i, name_ in enumerate(order)}
     nodes = [
         node(name, "Webhook", WEBHOOK, [0, 0], {
             "httpMethod": "POST",
@@ -63,18 +75,18 @@ def webhook_workflow(name: str, path: str, verify_src: str, handler_src: str, de
             "responseMode": "responseNode",
             "options": {"rawBody": True},
         }, webhookId=_id(name, "webhook-id")),
-        node(name, "Verify signature", CODE, [240, 0], {"mode": "runOnceForAllItems", "jsCode": code_source(verify_src)}),
-        node(name, "Respond", RESPOND, [480, 0], {
+        node(name, "Verify signature", CODE, [x["Verify signature"], 0], {"mode": "runOnceForAllItems", "jsCode": code_source(verify_src)}),
+        node(name, "Respond", RESPOND, [x["Respond"], 0], {
             "respondWith": "json",
             "responseBody": "={{ JSON.stringify({ ok: $json.ok }) }}",
             "options": {"responseCode": "={{ $json.status }}"},
         }),
-        node(name, "Handle", CODE, [720, 0], {"mode": "runOnceForAllItems", "jsCode": code_source(handler_src)}),
+        node(name, "Handle", CODE, [x["Handle"], 0], {"mode": "runOnceForAllItems", "jsCode": code_source(handler_src)}),
     ]
     return {
         "name": name,
         "nodes": nodes,
-        "connections": chain("Webhook", "Verify signature", "Respond", "Handle"),
+        "connections": chain(*order),
         "settings": {"executionOrder": "v1", "saveDataSuccessExecution": "none", "saveDataErrorExecution": "all"},
         "meta": {"templateCredsSetupCompleted": True, "description": description},
         "pinData": {},
@@ -118,7 +130,8 @@ WORKFLOWS = {
     "helpdesk-slack-actions.json": lambda: webhook_workflow(
         "Help desk: Slack button clicks", "helpdesk-slack-actions", "verify_slack_action.js",
         "handle_slack_action.js",
-        "Slack interactivity -> signed callbacks to the agent (approvals, SOP draft review)."),
+        "Slack interactivity -> signed callbacks to the agent (approvals, SOP draft review).",
+        respond_first=True),
     "helpdesk-weekly-reports.json": schedule_workflow,
 }
 

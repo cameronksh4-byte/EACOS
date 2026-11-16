@@ -139,7 +139,7 @@ def test_system_prompt_matches_tier_capabilities(monkeypatch):
 
 def _burst(n, category="vpn_network"):
     return [{"ticket_id": f"B{i}", "summary": "VPN", "category": category, "parent_incident_id": None,
-             "similarity": 0.93, "created_at": None} for i in range(n)]
+             "similarity": 0.93, "created_at": None, "reporter_email": f"user{i}@acme.com"} for i in range(n)]
 
 
 async def test_outage_burst_broadcasts_without_any_model_call(env):
@@ -273,18 +273,28 @@ async def test_literal_and_private_addresses_are_rejected():
 
 async def test_fetch_enforces_byte_cap_type_and_no_redirects(monkeypatch):
     async def public(host):
-        return True
+        return ["93.184.216.34"]
 
-    monkeypatch.setattr(vision, "resolves_to_public_ips", public)
+    monkeypatch.setattr(vision, "vetted_addresses", public)
+    seen = []
     responses = {
         "/ok.png": httpx.Response(200, content=PNG),
         "/huge.png": httpx.Response(200, content=b"\x89PNG\r\n\x1a\n" + b"0" * (6 * 1024 * 1024)),
         "/page.html": httpx.Response(200, content=b"<html></html>"),
         "/redirect.png": httpx.Response(302, headers={"location": "http://169.254.169.254/"}),
     }
-    transport = httpx.MockTransport(lambda req: responses[req.url.path])
-    monkeypatch.setattr(vision, "_http", httpx.AsyncClient(transport=transport, follow_redirects=False))
+
+    def handler(req):
+        seen.append(req)
+        return responses[req.url.path]
+
+    monkeypatch.setattr(vision, "_http", httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                                           follow_redirects=False))
     assert (await vision.fetch_image("https://files.slack.com/ok.png")).media_type == "image/png"
+    # The connection goes to the address that was vetted (no second DNS lookup to
+    # rebind), while TLS and the Host header still name the real host.
+    assert seen[0].url.host == "93.184.216.34" and seen[0].headers["host"] == "files.slack.com"
+    assert seen[0].extensions["sni_hostname"] == "files.slack.com"
     assert await vision.fetch_image("https://files.slack.com/huge.png") is None
     assert await vision.fetch_image("https://files.slack.com/page.html") is None
     assert await vision.fetch_image("https://files.slack.com/redirect.png") is None
@@ -437,14 +447,14 @@ def test_telemetry_event_rules():
 async def test_retry_sweep_delivers_owed_outage_notifications(env, monkeypatch):
     incident = str(uuid.uuid4())
 
-    async def pending(table, filters, columns="*", limit=None):
-        assert table == "outage_incidents" and filters["tier2_notified_at"] == "is.null"
-        assert filters["tenant_id"] == "eq.acme-corp"
-        return [{"incident_id": incident, "title": "VPN down", "ticket_count": 7}]
-
-    monkeypatch.setattr(supabase_client, "select", pending)
+    env["sb"].pending_outages = [{"incident_id": incident, "title": "VPN down", "ticket_count": 7,
+                                  "category": "vpn_network"}]
     assert await outage.retry_pending_notifications() == 1
     assert env["sb"].marked == [incident] and env["notified"][0]["payload"]["ticket_count"] == 7
+    # The retried notice still says what kind of outage it is.
+    assert env["notified"][0]["payload"]["category"] == "vpn_network"
+    # Claimed incidents aren't handed out twice (several workers run this loop).
+    assert await outage.retry_pending_notifications() == 0
 
 
 async def test_require_n8n_skips_the_slack_fallback(monkeypatch):

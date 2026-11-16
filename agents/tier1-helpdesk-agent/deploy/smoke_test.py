@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import os
 import socket
 import ssl
 import sys
@@ -52,11 +53,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", required=True)
     ap.add_argument("--connect")
-    ap.add_argument("--secret", required=True)
+    ap.add_argument("--secret", default=os.environ.get("SMOKE_WEBHOOK_SECRET", ""),
+                    help="the agent's WEBHOOK_SECRET. Prefer the SMOKE_WEBHOOK_SECRET environment "
+                         "variable: command-line arguments are visible to other users in `ps`")
     ap.add_argument("--tenant", required=True)
     ap.add_argument("--tier", required=True)
+    ap.add_argument("--disabled-features", default="", help="comma-separated DISABLED_FEATURES of the deployment")
+    ap.add_argument("--webchat", choices=["on", "off"], default="off", help="whether WEBCHAT_ENABLED is true")
     ap.add_argument("--wait", type=int, default=300, help="seconds to wait for /health")
     args = ap.parse_args()
+    if not args.secret:
+        ap.error("set SMOKE_WEBHOOK_SECRET (or pass --secret)")
+    disabled = {f.strip() for f in args.disabled_features.split(",") if f.strip()}
     c = Client(args.host, args.connect)
     auth = {"x-webhook-secret": args.secret}
     failures = 0
@@ -83,24 +91,37 @@ def main() -> int:
 
     ticket = {"tenant_id": args.tenant, "ticket_id": f"SMOKE-{int(time.time())}", "reporter_email": "smoke@example.com",
               "subject": "Write me a poem", "body": "Please write a short poem about autumn.", "source_system": "api"}
-    status, _ = c.request("POST", "/v1/triage", ticket, {"x-webhook-secret": "wrong"})
-    check("wrong webhook secret is rejected", status == 401, str(status))
+    if "triage_and_draft" in disabled:
+        status, _ = c.request("POST", "/v1/triage", ticket, auth)
+        check("triage is switched off (kill switch), so the route is hidden", status == 404, str(status))
+    else:
+        status, _ = c.request("POST", "/v1/triage", ticket, {"x-webhook-secret": "wrong"})
+        check("wrong webhook secret is rejected", status == 401, str(status))
 
-    status, body = c.request("POST", "/v1/triage", ticket, auth)
-    check("triage answers (Claude + Supabase + Voyage reachable)", status == 200, f"{status} {body}")
-    if status == 200:
-        check("non-IT request gets the courteous decline", body.get("scope") == "not_it_support"
-              and not body.get("requires_tier2_escalation"), json.dumps(body)[:300])
-        note = body.get("internal_tech_notes") or ""
-        check("budget ledger and model both worked", "Automatic triage skipped" not in note, note[:300])
+        status, body = c.request("POST", "/v1/triage", ticket, auth)
+        check("triage answers (Claude + Supabase + Voyage reachable)", status == 200, f"{status} {body}")
+        if status == 200:
+            check("non-IT request gets the courteous decline", body.get("scope") == "not_it_support"
+                  and not body.get("requires_tier2_escalation"), json.dumps(body)[:300])
+            note = body.get("internal_tech_notes") or ""
+            check("budget ledger and model both worked", "Automatic triage skipped" not in note, note[:300])
 
     status, _ = c.request("POST", "/v1/callbacks/approval", {})
-    expected = 404 if args.tier == "TIER_0_INCENTIVE" else 401
-    check(f"Tier 1 approval route {'hidden' if expected == 404 else 'present and signed'} at this tier",
+    approvals_on = args.tier != "TIER_0_INCENTIVE" and "manager_approvals" not in disabled
+    expected = 401 if approvals_on else 404
+    check(f"Tier 1 approval route {'present and signed' if approvals_on else 'hidden'} for this deployment",
           status == expected, str(status))
 
     status, body = c.request("GET", f"/v1/telemetry/{args.tenant}/roi-summary?days=1", headers=auth)
-    check("ROI summary reachable", status == 200, f"{status} {body}")
+    if "roi_telemetry" in disabled:
+        check("ROI summary hidden (switched off)", status == 404, str(status))
+    else:
+        check("ROI summary reachable", status == 200, f"{status} {body}")
+
+    status, _ = c.request("POST", "/v1/webchat/message", {})
+    expected = 401 if args.webchat == "on" else 404
+    check(f"website chat {'requires the website signature' if args.webchat == 'on' else 'is off (hidden)'}",
+          status == expected, str(status))
 
     print("\nSMOKE TEST PASSED" if not failures else f"\n{failures} SMOKE CHECK(S) FAILED")
     return 1 if failures else 0

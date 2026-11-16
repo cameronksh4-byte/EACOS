@@ -202,7 +202,23 @@ create table if not exists public.outage_incidents (
     unique (tenant_id, incident_id)
 );
 
-alter table public.outage_incidents add column if not exists tier2_notified_at timestamptz;
+-- Upgrades: when the column is new, incidents that already exist were handled
+-- under the old flow. Mark them notified once, so the retry loop doesn't page
+-- Tier 2 for all of history.
+do $$
+begin
+    if not exists (select 1 from information_schema.columns
+                   where table_schema = 'public' and table_name = 'outage_incidents'
+                     and column_name = 'tier2_notified_at') then
+        alter table public.outage_incidents add column tier2_notified_at timestamptz;
+        update public.outage_incidents set tier2_notified_at = last_seen_at;
+    end if;
+end;
+$$;
+-- The cluster's triaged category (so a retried notice can still say what it is),
+-- and a short lease so concurrent tickets and workers send one notice, not several.
+alter table public.outage_incidents add column if not exists category text;
+alter table public.outage_incidents add column if not exists tier2_notify_claimed_at timestamptz;
 
 create index if not exists outage_incidents_active_idx
     on public.outage_incidents (tenant_id, last_seen_at desc) where status = 'active';
@@ -216,6 +232,7 @@ create table if not exists public.recent_tickets (
     tenant_id          text not null,
     ticket_id          text not null,
     thread_id          text,
+    reporter_email     text,
     category           text,
     summary            text not null check (length(summary) <= 500),
     embedding          vector(1024) not null,
@@ -225,6 +242,8 @@ create table if not exists public.recent_tickets (
     foreign key (tenant_id, parent_incident_id)
         references public.outage_incidents (tenant_id, incident_id) on delete set null (parent_incident_id)
 );
+
+alter table public.recent_tickets add column if not exists reporter_email text;
 
 create index if not exists recent_tickets_window_idx on public.recent_tickets (tenant_id, created_at desc);
 
@@ -246,20 +265,21 @@ returns table (
     category           text,
     parent_incident_id uuid,
     similarity         float,
-    created_at         timestamptz
+    created_at         timestamptz,
+    reporter_email     text
 )
 language sql stable
 set search_path = public, extensions
 as $$
     with window_rows as materialized (
-        select t.ticket_id, t.summary, t.category, t.parent_incident_id, t.created_at,
+        select t.ticket_id, t.summary, t.category, t.parent_incident_id, t.created_at, t.reporter_email,
                1 - (t.embedding <=> p_query_embedding) as similarity
         from public.recent_tickets t
         where t.tenant_id = p_tenant_id
           and t.created_at >= now() - make_interval(mins => greatest(p_window_minutes, 1))
           and (p_exclude_ticket_id is null or t.ticket_id <> p_exclude_ticket_id)
     )
-    select ticket_id, summary, category, parent_incident_id, similarity, created_at
+    select ticket_id, summary, category, parent_incident_id, similarity, created_at, reporter_email
     from window_rows
     where similarity >= p_min_similarity
     order by similarity desc
@@ -268,13 +288,17 @@ $$;
 
 -- Open (or join) an outage for a cluster of matching tickets. A per-tenant
 -- advisory lock means a burst of simultaneous tickets yields one incident.
--- needs_tier2_notification is true until mark_outage_tier2_notified is called.
+-- needs_tier2_notification is true for the one caller that should send the
+-- notice: it claims a 2-minute lease, so the other tickets of the same burst
+-- don't each send their own. mark_outage_tier2_notified ends it for good.
 drop function if exists public.register_outage_cluster(text, text, text[], text);
+drop function if exists public.register_outage_cluster(text, text, text[], text, text);
 create function public.register_outage_cluster(
     p_tenant_id          text,
     p_ticket_id          text,
     p_matched_ticket_ids text[],
-    p_title              text
+    p_title              text,
+    p_category           text default null
 )
 returns table (incident_id uuid, is_new boolean, needs_tier2_notification boolean)
 language plpgsql
@@ -284,6 +308,7 @@ as $$
 declare
     v_incident uuid;
     v_new      boolean := false;
+    v_claimed  boolean := false;
     v_ids      text[] := array_append(coalesce(p_matched_ticket_ids, '{}'), p_ticket_id);
 begin
     perform pg_advisory_xact_lock(hashtextextended('outage:' || p_tenant_id, 0));
@@ -299,8 +324,9 @@ begin
     limit 1;
 
     if v_incident is null then
-        insert into public.outage_incidents (tenant_id, title)
-        values (p_tenant_id, left(coalesce(nullif(btrim(p_title), ''), 'Possible service outage'), 200))
+        insert into public.outage_incidents (tenant_id, title, category)
+        values (p_tenant_id, left(coalesce(nullif(btrim(p_title), ''), 'Possible service outage'), 200),
+                nullif(btrim(p_category), ''))
         returning outage_incidents.incident_id into v_incident;
         v_new := true;
     end if;
@@ -314,14 +340,41 @@ begin
     update public.outage_incidents i
        set ticket_count = (select count(*) from public.recent_tickets t
                             where t.tenant_id = p_tenant_id and t.parent_incident_id = v_incident),
-           last_seen_at = now()
+           last_seen_at = now(),
+           category = coalesce(i.category, nullif(btrim(p_category), ''))
      where i.tenant_id = p_tenant_id and i.incident_id = v_incident;
 
-    return query
-    select v_incident, v_new, i.tier2_notified_at is null
-    from public.outage_incidents i
-    where i.tenant_id = p_tenant_id and i.incident_id = v_incident;
+    with claim as (
+        update public.outage_incidents i
+           set tier2_notify_claimed_at = now()
+         where i.tenant_id = p_tenant_id and i.incident_id = v_incident
+           and i.tier2_notified_at is null
+           and (i.tier2_notify_claimed_at is null or i.tier2_notify_claimed_at < now() - interval '2 minutes')
+        returning 1
+    )
+    select exists (select 1 from claim) into v_claimed;
+
+    return query select v_incident, v_new, v_claimed;
 end;
+$$;
+
+-- Incidents still owed a Tier 2 notice, claimed for p_lease_seconds so that
+-- several workers running the retry loop don't all send it.
+create or replace function public.claim_pending_outage_notifications(
+    p_tenant_id     text,
+    p_lease_seconds int default 120
+)
+returns table (incident_id uuid, title text, ticket_count int, category text)
+language sql
+set search_path = public
+as $$
+    update public.outage_incidents i
+       set tier2_notify_claimed_at = now()
+     where i.tenant_id = p_tenant_id
+       and i.tier2_notified_at is null
+       and (i.tier2_notify_claimed_at is null
+            or i.tier2_notify_claimed_at < now() - make_interval(secs => greatest(p_lease_seconds, 10)))
+    returning i.incident_id, i.title, i.ticket_count, i.category;
 $$;
 
 create or replace function public.mark_outage_tier2_notified(p_tenant_id text, p_incident_id uuid)
@@ -366,12 +419,40 @@ create table if not exists public.conversation_threads (
 );
 
 alter table public.conversation_threads add column if not exists escalation_reason text;
-alter table public.conversation_threads add column if not exists escalation_notified_at timestamptz;
+do $$
+begin
+    -- Upgrades: threads escalated before this column existed were handled under
+    -- the old flow. Mark them notified once; don't page Tier 2 for all of history.
+    if not exists (select 1 from information_schema.columns
+                   where table_schema = 'public' and table_name = 'conversation_threads'
+                     and column_name = 'escalation_notified_at') then
+        alter table public.conversation_threads add column escalation_notified_at timestamptz;
+        update public.conversation_threads set escalation_notified_at = updated_at where status = 'escalated';
+    end if;
+    -- "add column" can't carry the length rule the table definition has.
+    if not exists (select 1 from pg_constraint
+                   where conrelid = 'public.conversation_threads'::regclass
+                     and conname = 'conversation_threads_escalation_reason_check') then
+        alter table public.conversation_threads
+            add constraint conversation_threads_escalation_reason_check
+            check (escalation_reason is null or length(escalation_reason) <= 200) not valid;
+    end if;
+end;
+$$;
+
+-- A Tier 2 notice is owed while escalation_reason is set and escalation_notified_at
+-- is null (whatever the status: a security report can be escalated while the
+-- agent is still asking a question). Threads escalated under the older rule
+-- (status only) get a reason so they stay covered.
+update public.conversation_threads
+   set escalation_reason = 'escalated'
+ where status = 'escalated' and escalation_reason is null and escalation_notified_at is null;
 
 create index if not exists conversation_threads_ticket_idx on public.conversation_threads (tenant_id, ticket_id);
-create index if not exists conversation_threads_unnotified_idx
+drop index if exists public.conversation_threads_unnotified_idx;
+create index if not exists conversation_threads_owed_notice_idx
     on public.conversation_threads (tenant_id, updated_at)
-    where status = 'escalated' and escalation_notified_at is null;
+    where escalation_reason is not null and escalation_notified_at is null;
 
 drop trigger if exists conversation_threads_updated_at on public.conversation_threads;
 create trigger conversation_threads_updated_at before update on public.conversation_threads
@@ -518,7 +599,17 @@ create table if not exists public.sop_drafts (
     check (frontmatter ? 'doc_id' and frontmatter ->> 'doc_id' = doc_id)
 );
 
-alter table public.sop_drafts add column if not exists review_notified_at timestamptz;
+do $$
+begin
+    -- Upgrades: drafts that already exist were sent for review under the old flow.
+    if not exists (select 1 from information_schema.columns
+                   where table_schema = 'public' and table_name = 'sop_drafts'
+                     and column_name = 'review_notified_at') then
+        alter table public.sop_drafts add column review_notified_at timestamptz;
+        update public.sop_drafts set review_notified_at = created_at;
+    end if;
+end;
+$$;
 
 create index if not exists sop_drafts_unnotified_idx
     on public.sop_drafts (tenant_id, created_at) where status = 'draft_pending_review' and review_notified_at is null;
@@ -639,6 +730,7 @@ create table if not exists public.llm_usage (
     ticket_id          text not null,
     purpose            text not null default 'triage'
                        check (purpose in ('vision','triage','reasoning','flywheel','report','embedding')),
+    -- (the public website chat spends under its own tenant_id, like any other tenant)
     model              text not null default 'unknown',
     status             text not null default 'settled' check (status in ('reserved','settled')),
     reserved_usd       numeric(12,6) not null default 0 check (reserved_usd >= 0),
@@ -658,10 +750,10 @@ returns numeric
 language sql stable
 set search_path = public
 as $$
-    select coalesce(sum(case
-               when status = 'settled' then cost_usd
-               when status = 'reserved' and created_at > now() - interval '15 minutes' then reserved_usd
-               else 0 end), 0)
+    -- A reservation that was never settled (the call is still running, or the
+    -- app lost the database right after it) keeps counting at its worst-case
+    -- estimate: the ledger may over-count, but can never under-count the cap.
+    select coalesce(sum(case when status = 'settled' then cost_usd else reserved_usd end), 0)
     from public.llm_usage
     where tenant_id = p_tenant_id
       and created_at >= public.utc_month_start();
@@ -742,9 +834,12 @@ as $$
 begin
     delete from public.recent_tickets where created_at < now() - interval '7 days';
 
+    -- An incident Tier 2 was never told about stays open (and keeps being
+    -- retried): closing it would silently drop the only escalation its tickets got.
     update public.outage_incidents
        set status = 'resolved', resolved_at = now()
-     where status = 'active' and last_seen_at < now() - interval '6 hours';
+     where status = 'active' and last_seen_at < now() - interval '6 hours'
+       and tier2_notified_at is not null;
 
     -- Guardrail #2 exemption control: an approval wait that times out is no
     -- longer covered, so its thread escalates to Tier 2.
@@ -757,7 +852,8 @@ begin
     update public.conversation_threads t
        set status = 'escalated',
            last_action = 'ESCALATE_TIER_2',
-           escalation_reason = 'approval_expired'
+           escalation_reason = 'approval_expired',
+           escalation_notified_at = null  -- a new notice is owed, even on a thread notified before
       from expired e
      where t.tenant_id = e.tenant_id and t.thread_id = e.thread_id
        and t.status = 'awaiting_approval';
@@ -765,6 +861,209 @@ begin
     update public.conversation_threads
        set status = 'expired'
      where status in ('active','awaiting_user') and expires_at <= now();
+
+    delete from public.webchat_ip_usage where day < (now() at time zone 'utc')::date - 7;
+    delete from public.webchat_visitors where last_seen_at < now() - interval '180 days';
+    delete from public.maintenance_leases where expires_at < now() - interval '1 day';
+end;
+$$;
+
+-- =============================================================================
+-- 10a. Maintenance lease: every worker of every task runs the same retry loop.
+--      One of them takes the lease for a tick; the rest skip it, so owed
+--      notifications are retried once, not once per worker.
+-- =============================================================================
+
+create table if not exists public.maintenance_leases (
+    name       text primary key check (length(name) between 1 and 64),
+    expires_at timestamptz not null
+);
+
+create or replace function public.try_acquire_maintenance_lease(p_name text, p_ttl_seconds int default 50)
+returns boolean
+language sql
+set search_path = public
+as $$
+    with taken as (
+        insert into public.maintenance_leases as l (name, expires_at)
+        values (p_name, now() + make_interval(secs => least(greatest(p_ttl_seconds, 5), 3600)))
+        on conflict (name) do update
+            set expires_at = excluded.expires_at
+          where l.expires_at <= now()
+        returning 1
+    )
+    select exists (select 1 from taken);
+$$;
+
+-- =============================================================================
+-- 10b. Public website chat: free-trial metering, plans and credits.
+--      Anonymous visitors get a fixed number of questions, then must sign up.
+--      Accounts get a monthly allowance by plan, then spend purchased credits.
+--      All counting happens here, atomically, before any model call.
+-- =============================================================================
+
+create table if not exists public.webchat_visitors (
+    visitor_id    text primary key check (visitor_id ~ '^[A-Za-z0-9_-]{16,64}$'),
+    uses          int not null default 0 check (uses >= 0),
+    first_seen_at timestamptz not null default now(),
+    last_seen_at  timestamptz not null default now()
+);
+
+-- Anonymous use per network per day (a keyed hash, never the address itself):
+-- clearing cookies doesn't buy another free trial.
+create table if not exists public.webchat_ip_usage (
+    ip_hash text not null check (ip_hash ~ '^[0-9a-f]{64}$'),
+    day     date not null,
+    uses    int  not null default 0 check (uses >= 0),
+    primary key (ip_hash, day)
+);
+
+create table if not exists public.webchat_accounts (
+    email        text primary key check (email = lower(email) and length(email) between 3 and 320),
+    plan         text not null default 'free' check (plan ~ '^[a-z0-9_]{1,32}$'),
+    credits      int  not null default 0 check (credits >= 0),
+    period_start date not null default (date_trunc('month', now() at time zone 'utc'))::date,
+    period_uses  int  not null default 0 check (period_uses >= 0),
+    created_at   timestamptz not null default now(),
+    updated_at   timestamptz not null default now()
+);
+
+drop trigger if exists webchat_accounts_updated_at on public.webchat_accounts;
+create trigger webchat_accounts_updated_at before update on public.webchat_accounts
+    for each row execute function public.set_updated_at();
+
+-- One row per plan change or credit purchase, keyed by the payment's own ID,
+-- so a retried payment webhook can never grant twice.
+create table if not exists public.webchat_grants (
+    grant_id    text primary key check (length(grant_id) between 8 and 200),
+    email       text not null,
+    plan        text,
+    add_credits int  not null default 0 check (add_credits >= 0),
+    created_at  timestamptz not null default now()
+);
+
+-- Count one question, or say why not. p_plan_limits maps plan -> questions per
+-- calendar month (UTC), e.g. {"free": 20, "starter": 250}; an unknown plan gets 0.
+-- charged: 'trial' | 'allowance' | 'credit' (what to give back if the answer fails).
+create or replace function public.webchat_consume(
+    p_visitor_id     text,
+    p_ip_hash        text,
+    p_account_email  text,
+    p_visitor_limit  int,
+    p_ip_daily_limit int,
+    p_plan_limits    jsonb
+)
+returns table (allowed boolean, reason text, charged text, plan text, used int, allowance int, credits int)
+language plpgsql
+set search_path = public
+as $$
+#variable_conflict use_column
+declare
+    v_month  date := (date_trunc('month', now() at time zone 'utc'))::date;
+    v_today  date := (now() at time zone 'utc')::date;
+    v_acct   public.webchat_accounts%rowtype;
+    v_limit  int;
+    v_uses   int;
+    v_ip     int;
+begin
+    if p_account_email is not null then
+        insert into public.webchat_accounts (email) values (lower(p_account_email)) on conflict do nothing;
+        select * into v_acct from public.webchat_accounts a where a.email = lower(p_account_email) for update;
+        if v_acct.period_start < v_month then
+            update public.webchat_accounts a set period_start = v_month, period_uses = 0
+             where a.email = v_acct.email;
+            v_acct.period_uses := 0;
+        end if;
+        v_limit := greatest(coalesce((p_plan_limits ->> v_acct.plan)::int, 0), 0);
+        if v_acct.period_uses < v_limit then
+            update public.webchat_accounts a set period_uses = a.period_uses + 1 where a.email = v_acct.email;
+            return query select true, null::text, 'allowance', v_acct.plan, v_acct.period_uses + 1, v_limit, v_acct.credits;
+        elsif v_acct.credits > 0 then
+            update public.webchat_accounts a set credits = a.credits - 1 where a.email = v_acct.email;
+            return query select true, null::text, 'credit', v_acct.plan, v_acct.period_uses, v_limit, v_acct.credits - 1;
+        else
+            return query select false, 'plan_limit', null::text, v_acct.plan, v_acct.period_uses, v_limit, 0;
+        end if;
+        return;
+    end if;
+
+    -- Anonymous visitor. Lock per visitor and per network so parallel requests can't overspend.
+    perform pg_advisory_xact_lock(hashtextextended('webchat:v:' || p_visitor_id, 0));
+    perform pg_advisory_xact_lock(hashtextextended('webchat:ip:' || p_ip_hash, 0));
+    select v.uses into v_uses from public.webchat_visitors v where v.visitor_id = p_visitor_id;
+    v_uses := coalesce(v_uses, 0);
+    select u.uses into v_ip from public.webchat_ip_usage u where u.ip_hash = p_ip_hash and u.day = v_today;
+    v_ip := coalesce(v_ip, 0);
+    if v_uses >= p_visitor_limit or v_ip >= p_ip_daily_limit then
+        return query select false, 'signup_required', null::text, null::text, v_uses, greatest(p_visitor_limit, 0), 0;
+        return;
+    end if;
+    insert into public.webchat_visitors as v (visitor_id, uses) values (p_visitor_id, 1)
+        on conflict (visitor_id) do update set uses = v.uses + 1, last_seen_at = now();
+    insert into public.webchat_ip_usage as u (ip_hash, day, uses) values (p_ip_hash, v_today, 1)
+        on conflict (ip_hash, day) do update set uses = u.uses + 1;
+    return query select true, null::text, 'trial', null::text, v_uses + 1, p_visitor_limit, 0;
+end;
+$$;
+
+-- Give a question back when no answer could be produced (model or budget unavailable).
+create or replace function public.webchat_refund(
+    p_visitor_id    text,
+    p_ip_hash       text,
+    p_account_email text,
+    p_charged       text
+)
+returns void
+language plpgsql
+set search_path = public
+as $$
+begin
+    if p_charged = 'trial' then
+        update public.webchat_visitors set uses = greatest(uses - 1, 0) where visitor_id = p_visitor_id;
+        update public.webchat_ip_usage set uses = greatest(uses - 1, 0)
+         where ip_hash = p_ip_hash and day = (now() at time zone 'utc')::date;
+    elsif p_charged = 'allowance' then
+        update public.webchat_accounts set period_uses = greatest(period_uses - 1, 0)
+         where email = lower(p_account_email);
+    elsif p_charged = 'credit' then
+        update public.webchat_accounts set credits = credits + 1 where email = lower(p_account_email);
+    end if;
+end;
+$$;
+
+-- Apply a plan change and/or a credit purchase exactly once per p_grant_id.
+create or replace function public.webchat_apply_grant(
+    p_grant_id    text,
+    p_email       text,
+    p_plan        text default null,
+    p_add_credits int  default 0
+)
+returns table (applied boolean, plan text, credits int)
+language plpgsql
+set search_path = public
+as $$
+#variable_conflict use_column
+declare
+    v_new boolean := false;
+begin
+    if coalesce(p_add_credits, 0) < 0 or coalesce(p_add_credits, 0) > 100000 then
+        raise exception 'add_credits out of range' using errcode = '22023';
+    end if;
+    with ins as (
+        insert into public.webchat_grants (grant_id, email, plan, add_credits)
+        values (p_grant_id, lower(p_email), p_plan, coalesce(p_add_credits, 0))
+        on conflict (grant_id) do nothing
+        returning 1
+    )
+    select exists (select 1 from ins) into v_new;
+    insert into public.webchat_accounts (email) values (lower(p_email)) on conflict do nothing;
+    if v_new then
+        update public.webchat_accounts a
+           set plan = coalesce(p_plan, a.plan),
+               credits = a.credits + coalesce(p_add_credits, 0)
+         where a.email = lower(p_email);
+    end if;
+    return query select v_new, a.plan, a.credits from public.webchat_accounts a where a.email = lower(p_email);
 end;
 $$;
 
@@ -788,6 +1087,20 @@ begin
         execute format(
             'create policy tenant_read on public.%I for select to authenticated '
             'using (tenant_id = public.request_tenant_id())', t);
+    end loop;
+end;
+$$;
+
+-- Tables without a tenant: service role only (RLS on, no policies, no grants).
+do $$
+declare
+    t text;
+begin
+    foreach t in array array[
+        'maintenance_leases','webchat_visitors','webchat_ip_usage','webchat_accounts','webchat_grants'
+    ] loop
+        execute format('alter table public.%I enable row level security', t);
+        execute format('revoke all on public.%I from anon, authenticated', t);
     end loop;
 end;
 $$;
@@ -818,6 +1131,8 @@ begin
           and p.proname in (
               'request_tenant_id','set_updated_at','utc_month_start','match_sop_chunks',
               'match_recent_tickets','register_outage_cluster','mark_outage_tier2_notified',
+              'claim_pending_outage_notifications','try_acquire_maintenance_lease',
+              'webchat_consume','webchat_refund','webchat_apply_grant',
               'increment_clarification',
               'decide_approval','tenant_roi_summary','tenant_knowledge_gaps','tenant_month_spend',
               'try_reserve_llm_budget','settle_llm_budget','run_housekeeping')

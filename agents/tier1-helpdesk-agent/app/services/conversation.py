@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 MAX_FACTS = 12
 OPEN_STATUSES = {"active", "awaiting_user"}
+# The retry loop leaves a just-updated thread alone for this long, so it doesn't
+# race the notification the pipeline is sending for the same turn.
+RETRY_GRACE_SECONDS = 120
 _STATUS_FOR_ACTION = {
     TriageAction.RESOLVE: "active",  # stays open: "that didn't work" continues the thread
     TriageAction.ASK_CLARIFICATION: "awaiting_user",
@@ -103,9 +106,12 @@ async def load(payload: IncomingTicketWebhook) -> ThreadState:
         await supabase_client.update(
             "conversation_threads", _filters(payload.tenant_id, thread_id),
             {"status": "active", "clarification_count": 0, "slots": {}, "last_action": None,
+             "escalation_reason": None, "escalation_notified_at": None,
              "expires_at": (datetime.now(timezone.utc) + timedelta(hours=settings.thread_ttl_hours)).isoformat()},
         )
-        row = {**row, "status": "active", "clarification_count": 0, "slots": {}}
+        # A fresh issue: the previous issue's history and facts must not steer
+        # retrieval or the model, and outage detection applies again.
+        return ThreadState(payload.tenant_id, thread_id, row["ticket_id"])
 
     history = await supabase_client.select(
         "conversation_messages", {**_filters(payload.tenant_id, thread_id), "order": "created_at.desc"},
@@ -182,8 +188,10 @@ async def record_turn(
     await append(state, "assistant", result.draft_user_reply)
     status = _STATUS_FOR_ACTION[result.action]
     values: dict[str, Any] = {"slots": slots, "last_action": result.action.value, "status": status}
-    if result.action is TriageAction.ESCALATE_TIER_2:
+    if result.requires_tier2_escalation:
+        # A Tier 2 notice is owed (again): the retry loop delivers it if the pipeline can't.
         values["escalation_reason"] = (result.guardrail_overrides or ["agent_escalation"])[0][:200]
+        values["escalation_notified_at"] = None
     if result.action is TriageAction.ASK_CLARIFICATION:
         values.pop("status")  # increment_clarification already set awaiting_user
     await supabase_client.update("conversation_threads", _filters(state.tenant_id, state.thread_id), values)
@@ -202,7 +210,11 @@ async def set_status(tenant_id: str, thread_id: str, status: str, last_action: T
     values: dict[str, Any] = {"status": status}
     if last_action is not None:
         values["last_action"] = last_action.value
-    if reason:
+    if status == "escalated":
+        # Each new escalation owes Tier 2 a notice, even on a thread notified before.
+        values["escalation_reason"] = (reason or "escalated")[:200]
+        values["escalation_notified_at"] = None
+    elif reason:
         values["escalation_reason"] = reason[:200]
     await supabase_client.update("conversation_threads", _filters(tenant_id, thread_id), values)
 
@@ -230,13 +242,20 @@ async def notify_escalation(tenant_id: str, thread_id: str, ticket_id: str, reas
 
 
 async def retry_pending_escalations() -> int:
-    """Notify Tier 2 about escalated threads nobody has been told about (e.g. approval expiry)."""
+    """Notify Tier 2 about threads that are owed a notice nobody received.
+
+    Covers approval expiry, failed deliveries, and security reports that are
+    escalated while the agent asks a clarifying question (status awaiting_user).
+    """
     delivered = 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=RETRY_GRACE_SECONDS)).isoformat()
     for tenant_id in get_settings().allowed_tenant_ids:
         rows = await supabase_client.select(
             "conversation_threads",
-            {"tenant_id": supabase_client.eq(tenant_id), "status": "eq.escalated",
-             "escalation_notified_at": "is.null"},
+            {"tenant_id": supabase_client.eq(tenant_id),
+             "status": "in.(active,awaiting_user,awaiting_approval,escalated)",
+             "escalation_reason": "not.is.null", "escalation_notified_at": "is.null",
+             "updated_at": f"lt.{cutoff}"},
             columns="thread_id,ticket_id,escalation_reason", limit=50,
         )
         for row in rows:

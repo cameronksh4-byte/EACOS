@@ -257,11 +257,13 @@ async def route_ticket(
         logger.warning("second opinion skipped (budget) ticket=%s", payload.ticket_id)
         return RouterDecision(first.output, first.model, tried)
     tried.append(second.model)
-    if second.refused:
-        return RouterDecision(refusal_output(), second.model, tried)
     if second.output is not None:
         return RouterDecision(second.output, second.model, tried)
     if first.output is not None:
-        # Sonnet failed; keep Haiku's answer. Guardrails still escalate it if risky.
+        # Sonnet failed or declined; keep Haiku's answer. It was only sent for a
+        # second opinion because it's risky or unsure, so guardrails escalate it.
+        # A second-opinion refusal must never turn a security report into a decline.
         return RouterDecision(first.output, first.model, tried)
-    raise LLMUnavailableError(f"no usable model output: {[first.error, second.error]}")
+    # No usable answer at all (even if the second model declined): a human takes it.
+    outcomes = [first.error, "refused" if second.refused else second.error]
+    raise LLMUnavailableError(f"no usable model output: {outcomes}")

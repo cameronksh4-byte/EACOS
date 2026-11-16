@@ -38,6 +38,8 @@ EMAILS = {"U_BOSS": "boss@acme.com", "U_REVIEWER": "it-manager@acme.com"}
 
 class Mock(BaseHTTPRequestHandler):
     calls: list[dict] = []
+    # Slack error codes to answer with instead of success (per API method).
+    slack_errors: dict[str, str] = {}
 
     def log_message(self, *args):  # quiet
         pass
@@ -64,6 +66,8 @@ class Mock(BaseHTTPRequestHandler):
     def do_GET(self):
         e = self._record(b"")
         if e["path"] == "/slack/users.lookupByEmail":
+            if "users.lookupByEmail" in Mock.slack_errors:
+                return self._send(200, {"ok": False, "error": Mock.slack_errors["users.lookupByEmail"]})
             return self._send(200, {"ok": True, "user": {"id": "U_" + e["query"]["email"].split("@")[0].upper()}})
         if e["path"] == "/slack/users.info":
             return self._send(200, {"ok": True, "user": {"id": e["query"]["user"],
@@ -76,6 +80,8 @@ class Mock(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         e = self._record(body)
         if e["path"] == "/slack/chat.postMessage":
+            if "chat.postMessage" in Mock.slack_errors:
+                return self._send(200, {"ok": False, "error": Mock.slack_errors["chat.postMessage"]})
             return self._send(200, {"ok": True, "ts": "1700000000.000100"})
         if e["path"].startswith("/slack-response/"):
             return self._send(200, {"ok": True})
@@ -219,6 +225,29 @@ def main() -> int:
             msg = calls("/slack/chat.postMessage")[0]["json"]
             assert msg["channel"] == "C_ALERT" and "Manual provisioning needed" in msg["text"], msg
 
+        def failed_delivery_is_reported_to_the_agent():
+            # n8n answers the agent only after the work is done. If Slack refuses,
+            # the agent must see a failure (it then retries, falls back or escalates),
+            # never a 200 that marks an outage or approval card as delivered.
+            Mock.calls.clear()
+            Mock.slack_errors = {"chat.postMessage": "not_in_channel"}
+            try:
+                delivered = agent_post("helpdesk-notify", {
+                    "event": "outage.detected", "tenant_id": "acme-corp", "text": "Possible outage",
+                    "data": {"incident_id": "i-1", "ticket_count": 6}})
+                assert delivered is False, "agent was told an undeliverable outage alert was delivered"
+                assert calls("/slack/chat.postMessage"), "n8n never tried Slack"
+                Mock.slack_errors = {"users.lookupByEmail": "users_not_found"}
+                assert agent_post("helpdesk-approvals", card) is False, \
+                    "agent was told an approval card reached an approver who isn't in Slack"
+            finally:
+                Mock.slack_errors = {}
+            Mock.calls.clear()
+            assert agent_post("helpdesk-notify", {
+                "event": "thread.escalated", "tenant_id": "acme-corp", "text": "Escalation <!channel>", "data": {}})
+            text = calls("/slack/chat.postMessage")[0]["json"]["text"]
+            assert "<!channel>" not in text and "&lt;!channel&gt;" in text, text
+
         def denial_notifies_requester():
             Mock.calls.clear()
             assert agent_post("helpdesk-approvals", {
@@ -328,6 +357,7 @@ def main() -> int:
             ("unsigned agent webhook -> 401, no side effects", bad_agent_signature),
             ("provisioning with no provider -> manual-provisioning alert", provisioning_without_provider_alerts),
             ("approval.denied -> requester DM with note", denial_notifies_requester),
+            ("Slack refuses -> the agent sees a failure, not 'delivered'", failed_delivery_is_reported_to_the_agent),
             ("Slack [Approve] -> signed callback the agent accepts + message update", approve_click_reaches_agent_signed),
             ("forged Slack click -> 401, agent never called", forged_slack_click_rejected),
             ("notifications -> alert / SOP review / exec channels", notifications_route_to_channels),

@@ -29,6 +29,8 @@ from app.schemas.ticket import (
     TriageAction,
 )
 
+TRIAGE_UNAVAILABLE = "triage_unavailable"  # marks results produced without a model answer
+
 TIER1_SERVICES = (
     "passwords and sign-in, VPN and Wi-Fi, printers and other hardware, "
     "email and Office apps, and access to approved software"
@@ -188,19 +190,25 @@ def enforce_policy(
     if is_security and severity in (SeverityLevel.LOW, SeverityLevel.MEDIUM):
         severity = SeverityLevel.HIGH
 
-    gap = draft.missing_sop_topic.strip()
+    gap = draft.missing_sop_topic.strip()[:200]  # the model isn't bound by the schema's length limit
     if not cited and not gap and draft.action is not TriageAction.ASK_CLARIFICATION:
         gap = f"{draft.category.value.replace('_', ' ')}: undocumented issue"
+
+    # CONFIDENCE_THRESHOLD may be configured above the hard 0.80 floor the
+    # result validator enforces; apply the stricter configured value here.
+    action, wants_escalation, below_configured = draft.action, draft.requires_tier2_escalation, False
+    if action is TriageAction.RESOLVE and draft.confidence_score < settings.confidence_threshold:
+        action, wants_escalation, below_configured = TriageAction.ESCALATE_TIER_2, True, True
 
     # The validator applies guardrail #2 and drops unbacked exemptions.
     result = AgentTriageResult(
         **common,
         scope=ScopeVerdict.IN_SCOPE,
-        action=draft.action,
+        action=action,
         category=draft.category,
         severity=severity,
         confidence_score=draft.confidence_score,
-        requires_tier2_escalation=draft.requires_tier2_escalation,
+        requires_tier2_escalation=wants_escalation,
         cited_sop_ids=cited,
         draft_user_reply=draft.draft_user_reply,
         clarifying_question=draft.clarifying_question.strip() or None,
@@ -208,6 +216,8 @@ def enforce_policy(
         approval_id=approval_id,
         missing_sop_topic=(gap or None) if not cited else None,
     )
+    if below_configured and "confidence_below_threshold" not in result.guardrail_overrides:
+        result.guardrail_overrides.append("confidence_below_threshold")
 
     notes: list[str] = [notes_prefix, draft.internal_tech_notes]
     if dropped:
@@ -279,6 +289,7 @@ def unavailable_result(payload: IncomingTicketWebhook, settings: Settings, reaso
         requires_tier2_escalation=True,
         draft_user_reply=unavailable_message(settings, payload.ticket_id),
         internal_tech_notes=f"Automatic triage skipped: {reason}.",
+        guardrail_overrides=[TRIAGE_UNAVAILABLE],
     )
 
 

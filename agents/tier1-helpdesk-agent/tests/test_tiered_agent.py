@@ -255,6 +255,8 @@ GATED_ROUTES = {
 }
 UNGATED_ROUTES = {("GET", "/health"), ("POST", "/webhooks/slack"), ("POST", "/webhooks/teams"),
                   ("POST", "/webhooks/jira")}
+# Not tied to a tier: off unless WEBCHAT_ENABLED, and then signed by the website's server.
+WEBCHAT_ROUTES = {("POST", "/v1/webchat/message"), ("POST", "/v1/webchat/grants"), ("POST", "/v1/webchat/account")}
 
 
 def _gate_of(route: APIRoute) -> Feature | None:
@@ -274,7 +276,12 @@ def test_every_v1_route_is_gated_as_declared():
             for method in route.methods - {"HEAD", "OPTIONS"}:
                 seen[(method, route.path)] = _gate_of(route)
     assert {k: v for k, v in seen.items() if v} == GATED_ROUTES
-    assert set(seen) == set(GATED_ROUTES) | UNGATED_ROUTES, "new route: declare its gate here"
+    assert set(seen) == set(GATED_ROUTES) | UNGATED_ROUTES | WEBCHAT_ROUTES, "new route: declare its gate here"
+    for route in app.routes:
+        if isinstance(route, APIRoute) and ("POST", route.path) in WEBCHAT_ROUTES:
+            calls = [getattr(d.call, "__name__", "") for d in route.dependant.dependencies]
+            # 404 gate first, then the signature (same order as the tier gates).
+            assert calls[:2] == ["require_webchat_enabled", "require_webchat_signature"], (route.path, calls)
 
 
 @pytest.mark.parametrize("tier", list(ServiceTier))

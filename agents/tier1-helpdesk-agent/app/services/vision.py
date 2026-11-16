@@ -5,9 +5,11 @@ and the UI state. Those findings are added to the retrieval query, which is
 where exact error codes help most, and passed to triage as untrusted data.
 
 Attachment URLs are user-controlled, so fetching is locked down (SSRF):
-https only (schema), host allowlist, no private/loopback/link-local targets,
-no redirects, a byte cap, and image type detected from magic bytes rather
-than the server's Content-Type.
+https only (schema), host allowlist, only globally routable addresses (and the
+connection goes to the exact address that was checked, so DNS can't change
+between the check and the fetch), no redirects, a byte cap, and image type
+detected from magic bytes rather than the server's Content-Type. Slack and
+Jira credentials are only ever sent to files.slack.com and the configured Jira site.
 """
 
 from __future__ import annotations
@@ -104,50 +106,81 @@ def host_allowed(host: str, allowed: list[str]) -> bool:
 
 
 def _is_public_ip(address: str) -> bool:
+    """Globally routable only: excludes private, loopback, link-local, CGNAT (100.64/10), reserved..."""
     ip = ipaddress.ip_address(address)
-    return not (
-        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
-        or ip.is_reserved or ip.is_unspecified
-    )
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
 
 
-async def resolves_to_public_ips(host: str) -> bool:
+async def vetted_addresses(host: str) -> list[str]:
+    """The host's addresses if every one of them is public; otherwise []."""
     try:
         ipaddress.ip_address(host)
-        return False  # literal IPs are never allowed
+        return []  # literal IPs are never allowed
     except ValueError:
         pass
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    except OSError:
-        return False
-    addresses = {info[4][0] for info in infos}
-    return bool(addresses) and all(_is_public_ip(a) for a in addresses)
+    except (OSError, UnicodeError):  # unresolvable, or not a valid IDNA name
+        return []
+    addresses = sorted({str(info[4][0]) for info in infos})
+    return addresses if addresses and all(_is_public_ip(a) for a in addresses) else []
+
+
+async def resolves_to_public_ips(host: str) -> bool:
+    return bool(await vetted_addresses(host))
+
+
+def _jira_host() -> str:
+    try:
+        return (httpx.URL(get_settings().jira_base_url).host or "").lower()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _auth_headers(host: str) -> dict[str, str]:
+    """Credentials go to the one host they belong to, never to a look-alike subdomain."""
     settings = get_settings()
-    if host_allowed(host, ["slack.com"]) and settings.slack_bot_token.get_secret_value():
+    host = host.lower().rstrip(".")
+    if host == "files.slack.com" and settings.slack_bot_token.get_secret_value():
         return {"Authorization": f"Bearer {settings.slack_bot_token.get_secret_value()}"}
-    if host_allowed(host, ["atlassian.net"]) and settings.jira_api_token.get_secret_value():
+    if host and host == _jira_host() and settings.jira_api_token.get_secret_value():
         raw = f"{settings.jira_email}:{settings.jira_api_token.get_secret_value()}".encode()
         return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
     return {}
 
 
 async def fetch_image(url: str) -> FetchedImage | None:
-    """Download one attachment if, and only if, every check passes."""
+    """Download one attachment if, and only if, every check passes. Never raises."""
+    try:
+        return await _fetch_image(url)
+    except Exception as exc:  # noqa: BLE001  (malformed URL, IDNA error, bad header...)
+        logger.info("attachment skipped: %s", type(exc).__name__)
+        return None
+
+
+async def _fetch_image(url: str) -> FetchedImage | None:
     settings = get_settings()
     parsed = httpx.URL(url)
-    host = parsed.host or ""
-    if parsed.scheme != "https" or not host_allowed(host, settings.attachment_allowed_hosts):
+    host = (parsed.host or "").lower().rstrip(".")
+    if parsed.scheme != "https" or parsed.port not in (None, 443) or not host_allowed(
+            host, settings.attachment_allowed_hosts):
         logger.info("attachment skipped: host not allowed host=%s", host)
         return None
-    if not await resolves_to_public_ips(host):
+    addresses = await vetted_addresses(host)
+    if not addresses:
         logger.warning("attachment skipped: host resolves to a non-public address host=%s", host)
         return None
+    if host == _jira_host() and "/attachment/content/" in parsed.path:
+        # Jira answers 303 to its media CDN by default; ask for the bytes directly.
+        parsed = parsed.copy_merge_params({"redirect": "false"})
+    # Connect to the address that was just checked (TLS still verifies the host name).
+    pinned = parsed.copy_with(host=addresses[0])
+    headers = {"Host": host, **_auth_headers(host)}
     try:
-        async with _client().stream("GET", url, headers=_auth_headers(host)) as resp:
+        async with _client().stream("GET", pinned, headers=headers,
+                                    extensions={"sni_hostname": host}) as resp:
             if resp.status_code != 200:
                 logger.info("attachment skipped: status=%s host=%s", resp.status_code, host)
                 return None
@@ -196,8 +229,8 @@ async def analyze_attachments(
         return None
 
     urls = [str(u) for u in payload.attachment_urls[: settings.max_attachments]]
-    fetched = await asyncio.gather(*(fetch_image(u) for u in urls))
-    images = [f for f in fetched if f is not None]
+    fetched = await asyncio.gather(*(fetch_image(u) for u in urls), return_exceptions=True)
+    images = [f for f in fetched if isinstance(f, FetchedImage)]
     skipped = len(payload.attachment_urls) - len(images)
     if not images:
         return VisionContext(images_analyzed=0, images_skipped=skipped)

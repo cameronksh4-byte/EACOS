@@ -1,6 +1,6 @@
 // Code node: verify a webhook from the help desk agent and pass the event on.
-// Output: one item { ok, status, event, envelope }. The Respond node returns `status`,
-// and the handler node does nothing unless ok is true.
+// Output: one item { ok, status, event, envelope }. The handler node does nothing
+// unless ok is true, and passes { ok, status } on to the Respond node.
 const helpers = this.helpers;
 const item = $input.first();
 const raw = await rawBodyOf(helpers, item);

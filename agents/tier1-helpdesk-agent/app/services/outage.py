@@ -60,6 +60,7 @@ async def record_and_detect(
             "tenant_id": payload.tenant_id,
             "ticket_id": payload.ticket_id,
             "thread_id": payload.thread_id,
+            "reporter_email": payload.reporter_email,
             "summary": summary[:500],
             "embedding": embedding,
         },
@@ -81,6 +82,15 @@ async def record_and_detect(
     if len(matches) < settings.outage_min_matching_tickets:
         return OutageDecision(active=False, matched_tickets=len(matches), matches=matches)
 
+    # One person re-sending the same message isn't an outage (and mustn't be able
+    # to trigger a company-wide broadcast): the cluster needs several reporters.
+    reporters = {(r.get("reporter_email") or "").lower() for r in rows} | {payload.reporter_email.lower()}
+    reporters.discard("")
+    if len(reporters) < settings.outage_min_distinct_reporters:
+        logger.info("similar-ticket cluster ignored: %d reporter(s) tenant=%s matched=%d",
+                    len(reporters), payload.tenant_id, len(matches))
+        return OutageDecision(active=False, matched_tickets=len(matches), matches=matches)
+
     # Only a cluster the model has already seen as in-scope IT can be an outage.
     # Five similar payroll questions are not a service outage.
     category = _dominant_category([r.get("category") for r in rows])
@@ -96,6 +106,7 @@ async def record_and_detect(
             "p_ticket_id": payload.ticket_id,
             "p_matched_ticket_ids": [m.ticket_id for m in matches],
             "p_title": payload.subject[:200],
+            "p_category": category.value,
         },
     )
     row = registered[0] if isinstance(registered, list) else registered
@@ -145,19 +156,22 @@ async def notify_incident(
 
 
 async def retry_pending_notifications() -> int:
-    """Deliver any outage notifications that failed earlier. Returns how many succeeded."""
+    """Deliver any outage notifications that failed earlier. Returns how many succeeded.
+
+    Incidents are claimed in the database for a short lease, so several workers
+    (or a retry racing the first attempt) don't page Tier 2 twice.
+    """
     settings = get_settings()
     delivered = 0
     for tenant_id in settings.allowed_tenant_ids:
-        rows = await supabase_client.select(
-            "outage_incidents",
-            {"tenant_id": supabase_client.eq(tenant_id), "status": "eq.active", "tier2_notified_at": "is.null"},
-            columns="incident_id,title,ticket_count",
-            limit=20,
-        )
+        rows = await supabase_client.rpc("claim_pending_outage_notifications", {"p_tenant_id": tenant_id}) or []
         for row in rows:
-            if await notify_incident(tenant_id, UUID(row["incident_id"]), row["ticket_count"],
-                                     TicketCategory.UNKNOWN, row["title"]):
+            try:
+                category = TicketCategory(row.get("category") or "unknown")
+            except ValueError:
+                category = TicketCategory.UNKNOWN
+            if await notify_incident(tenant_id, UUID(str(row["incident_id"])), row["ticket_count"],
+                                     category, row["title"]):
                 delivered += 1
     return delivered
 

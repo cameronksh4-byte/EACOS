@@ -129,6 +129,12 @@ function formDecode(raw) {
   return out;
 }
 
+// Slack control characters. Text that came from a requester (or a model) must not
+// be able to ping <!channel>, mention people, or forge links in technicians' channels.
+function slackEscape(text) {
+  return String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 function truncate(text, max) {
   const s = String(text || '');
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;

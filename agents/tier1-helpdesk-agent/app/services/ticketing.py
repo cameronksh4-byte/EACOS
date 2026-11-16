@@ -9,8 +9,10 @@ technicians (a Slack channel, or an internal Jira comment plus a label).
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
+import html
 import logging
 import re
 import time
@@ -21,8 +23,9 @@ import httpx
 
 from app.config import Feature, get_settings
 from app.schemas.ticket import AgentTriageResult, IncomingTicketWebhook
-from app.services import supabase_client
-from app.services.pipeline import process_ticket
+from app.services import context_enrichment, supabase_client
+from app.services.pipeline import escalation_summary, process_ticket
+
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +78,12 @@ def verify_slack_signature(
     try:
         if abs((now or time.time()) - int(timestamp)) > 60 * 5:
             return False  # replay protection
-    except ValueError:
+    except (ValueError, OverflowError):
         return False
     base = f"v0:{timestamp}:".encode() + body
     expected = "v0=" + hmac.new(signing_secret.encode(), base, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    # Compare bytes: compare_digest raises on non-ASCII str input.
+    return hmac.compare_digest(expected.encode(), signature.encode())
 
 
 def verify_teams_signature(shared_secret_b64: str, body: bytes, authorization: str) -> bool:
@@ -87,17 +91,17 @@ def verify_teams_signature(shared_secret_b64: str, body: bytes, authorization: s
         return False
     try:
         key = base64.b64decode(shared_secret_b64)
-    except ValueError:
+    except (ValueError, binascii.Error):
         return False
-    expected = base64.b64encode(hmac.new(key, body, hashlib.sha256).digest()).decode()
-    return hmac.compare_digest(expected, authorization[len("HMAC ") :])
+    expected = base64.b64encode(hmac.new(key, body, hashlib.sha256).digest())
+    return hmac.compare_digest(expected, authorization[len("HMAC ") :].encode())
 
 
 def verify_jira_signature(secret: str, body: bytes, header: str) -> bool:
     if not secret or not header.startswith("sha256="):
         return False
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, header)
+    return hmac.compare_digest(expected.encode(), header.encode())
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +109,13 @@ def verify_jira_signature(secret: str, body: bytes, header: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _SLACK_MENTION = re.compile(r"<@[A-Z0-9]+>")
+# Message subtypes that are still a person talking (everything else is an edit, join, bot...).
+_SLACK_USER_SUBTYPES = (None, "file_share", "thread_broadcast")
+
+
+def slack_escape(text: str) -> str:
+    """Slack control characters, so requester or model text can't ping <!channel> or forge links."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 async def _slack_api(method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -149,7 +160,7 @@ def image_urls(items: Any, *, url_key: str, type_key: str, limit: int = 10) -> l
 
 def slack_event_to_ticket(event: dict[str, Any]) -> tuple[str, str, str] | None:
     """Return (channel, thread_ts, text) for events we should answer, else None."""
-    if event.get("bot_id") or event.get("subtype"):
+    if event.get("bot_id") or event.get("subtype") not in _SLACK_USER_SUBTYPES:
         return None  # ignore bots (including ourselves) and edits/joins
     kind = event.get("type")
     if kind == "app_mention" or (kind == "message" and event.get("channel_type") == "im"):
@@ -160,9 +171,16 @@ def slack_event_to_ticket(event: dict[str, Any]) -> tuple[str, str, str] | None:
     return None
 
 
-def slack_thread_reply(event: dict[str, Any]) -> tuple[str, str, str] | None:
-    """A plain reply inside a channel thread (no @mention), e.g. answering a clarifying question."""
-    if event.get("bot_id") or event.get("subtype") or event.get("type") != "message":
+def slack_thread_reply(event: dict[str, Any], bot_user_id: str = "") -> tuple[str, str, str] | None:
+    """A plain reply inside a channel thread (no @mention), e.g. answering a clarifying question.
+
+    A reply that @mentions the bot also arrives as an `app_mention` event, which
+    is the one that gets answered: handling both would process the message twice.
+    """
+    if (event.get("bot_id") or event.get("subtype") not in _SLACK_USER_SUBTYPES
+            or event.get("type") != "message"):
+        return None
+    if bot_user_id and f"<@{bot_user_id}>" in event.get("text", ""):
         return None
     thread_ts, ts = event.get("thread_ts"), event.get("ts")
     text = _SLACK_MENTION.sub("", event.get("text", "")).strip()
@@ -180,15 +198,18 @@ async def _known_thread(thread_id: str) -> bool:
     return bool(rows)
 
 
-async def handle_slack_event(event: dict[str, Any]) -> None:
+async def handle_slack_event(event: dict[str, Any], bot_user_id: str = "") -> None:
     parsed = slack_event_to_ticket(event)
     if parsed is None and get_settings().feature_enabled(Feature.MULTI_TURN):
-        reply = slack_thread_reply(event)
+        reply = slack_thread_reply(event, bot_user_id)
         if reply and await _known_thread(f"slack:{reply[0]}:{reply[1]}"):
             parsed = reply
     if parsed is None:
         return
     channel, thread_ts, text = parsed
+    # One Slack message is one turn, however many event types announce it.
+    if event.get("ts") and seen_events.check_and_add(f"slack-msg:{channel}:{event['ts']}"):
+        return
     settings = get_settings()
     ticket = IncomingTicketWebhook(
         tenant_id=settings.tenant_id,
@@ -201,14 +222,9 @@ async def handle_slack_event(event: dict[str, Any]) -> None:
         attachment_urls=image_urls(event.get("files"), url_key="url_private", type_key="mimetype"),
     )
     result = await process_ticket(ticket)
-    await _slack_api("chat.postMessage", {"channel": channel, "thread_ts": thread_ts, "text": result.draft_user_reply})
-    # With multi-turn on, the pipeline notifies Tier 2 for the thread (and records it).
-    thread_handled = settings.feature_enabled(Feature.MULTI_TURN) and ticket.thread_id
-    if result.requires_tier2_escalation and settings.slack_escalation_channel and not thread_handled:
-        await _slack_api(
-            "chat.postMessage",
-            {"channel": settings.slack_escalation_channel, "text": escalation_summary(ticket, result)},
-        )
+    # Tier 2 is notified by the pipeline (every channel, with retry where a thread exists).
+    await _slack_api("chat.postMessage",
+                     {"channel": channel, "thread_ts": thread_ts, "text": slack_escape(result.draft_user_reply)})
 
 
 # ---------------------------------------------------------------------------
@@ -219,16 +235,26 @@ _TEAMS_AT = re.compile(r"<at>.*?</at>", re.IGNORECASE)
 _HTML_TAG = re.compile(r"<[^>]+>")
 
 
-def teams_activity_to_ticket(activity: dict[str, Any]) -> IncomingTicketWebhook:
+async def process_teams_activity(activity: dict[str, Any]) -> AgentTriageResult:
+    """Resolve the sender's real address (so identity context and approvals work), then triage."""
+    sender = activity.get("from") if isinstance(activity.get("from"), dict) else {}
+    email = await context_enrichment.resolve_teams_email(str(sender.get("aadObjectId") or ""))
+    return await process_ticket(teams_activity_to_ticket(activity, email))
+
+
+def teams_activity_to_ticket(activity: dict[str, Any], reporter_email: str | None = None) -> IncomingTicketWebhook:
     settings = get_settings()
     raw = activity.get("text", "") or ""
-    text = _HTML_TAG.sub("", _TEAMS_AT.sub("", raw)).strip()
-    sender = activity.get("from", {}) or {}
-    reporter = sender.get("aadObjectId") or sender.get("id") or "unknown"
+    if not isinstance(raw, str):
+        raw = ""
+    # Teams sends HTML: drop the tags, then turn &amp; / &lt; / &nbsp; back into characters.
+    text = html.unescape(_HTML_TAG.sub("", _TEAMS_AT.sub("", raw))).replace("\xa0", " ").strip()
+    sender = activity.get("from") if isinstance(activity.get("from"), dict) else {}
+    reporter = str(sender.get("aadObjectId") or sender.get("id") or "unknown")[:200]
     return IncomingTicketWebhook(
         tenant_id=settings.tenant_id,
-        ticket_id=f"TMS-{activity.get('id', int(time.time()))}",
-        reporter_email=f"{reporter}@teams.invalid",
+        ticket_id=f"TMS-{str(activity.get('id') or int(time.time()))[:120]}",
+        reporter_email=reporter_email or f"{reporter}@teams.invalid",
         subject=(text.splitlines()[0] if text else "(empty message)")[:200],
         body=text or "(empty message)",
         source_system="teams",
@@ -276,8 +302,9 @@ def _adf_doc(text: str) -> dict[str, Any]:
 
 def jira_issue_to_ticket(issue: dict[str, Any]) -> IncomingTicketWebhook:
     settings = get_settings()
-    fields = issue.get("fields", {}) or {}
-    reporter = (fields.get("reporter") or {}).get("emailAddress") or "unknown@jira.invalid"
+    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+    reporter_field = fields.get("reporter") if isinstance(fields.get("reporter"), dict) else {}
+    reporter = reporter_field.get("emailAddress") or "unknown@jira.invalid"
     return IncomingTicketWebhook(
         tenant_id=settings.tenant_id,
         ticket_id=issue["key"],
@@ -322,18 +349,3 @@ async def handle_jira_issue(issue: dict[str, Any]) -> None:
             f"/rest/api/3/issue/{key}",
             {"update": {"labels": [{"add": settings.jira_escalation_label}]}},
         )
-
-
-# ---------------------------------------------------------------------------
-
-
-def escalation_summary(ticket: IncomingTicketWebhook, result: AgentTriageResult) -> str:
-    return (
-        f"Tier 2 escalation: {ticket.ticket_id} ({ticket.source_system})\n"
-        f"Reporter: {ticket.reporter_email}\n"
-        f"Scope: {result.scope.value} | Category: {result.category.value} | "
-        f"Severity: {result.severity.value} | Confidence: {result.confidence_score:.2f}\n"
-        f"Subject: {ticket.subject}\n"
-        f"Cited SOPs: {', '.join(result.cited_sop_ids) or 'none'}\n"
-        f"Notes: {result.internal_tech_notes or '-'}"
-    )

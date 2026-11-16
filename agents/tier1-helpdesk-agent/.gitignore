@@ -10,3 +10,4 @@ terraform/*.tfvars
 deploy/*.env
 !deploy/deploy.env.example
 deploy/.venv/
+terraform/.terraform.lock.hcl

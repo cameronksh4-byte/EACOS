@@ -115,6 +115,14 @@ variable "disabled_features" {
   type        = list(string)
   default     = []
   description = "Kill switch: features to turn off (can only remove, never add, features)."
+  validation {
+    # The app refuses to start on an unknown feature name, so catch typos at plan time.
+    condition = alltrue([for f in var.disabled_features : contains([
+      "triage_and_draft", "screenshot_vision", "outage_detection", "roi_telemetry",
+      "context_enrichment", "multi_turn", "manager_approvals", "knowledge_flywheel", "executive_reports",
+    ], f)])
+    error_message = "disabled_features may only contain: triage_and_draft, screenshot_vision, outage_detection, roi_telemetry, context_enrichment, multi_turn, manager_approvals, knowledge_flywheel, executive_reports."
+  }
 }
 
 variable "allowed_tenant_ids" {
@@ -266,12 +274,22 @@ locals {
   environment = merge(var.extra_environment, local.base_environment) # base wins on conflicts
 
   # What each tier needs at startup (mirrors Settings.missing_core_settings), checked at plan time.
-  outage_on      = !contains(var.disabled_features, "outage_detection")
-  approvals_on   = local.tier_rank >= 1 && !contains(var.disabled_features, "manager_approvals")
-  flywheel_on    = local.tier_rank >= 2 && !contains(var.disabled_features, "knowledge_flywheel")
-  reports_on     = local.tier_rank >= 2 && !contains(var.disabled_features, "executive_reports")
-  has_env        = { for k in ["N8N_APPROVAL_WEBHOOK_URL", "N8N_NOTIFY_WEBHOOK_URL", "SLACK_ESCALATION_CHANNEL"] : k => contains(keys(var.extra_environment), k) }
-  has_secret     = { for k in ["N8N_OUTBOUND_SIGNING_SECRET", "N8N_CALLBACK_SECRET", "SLACK_BOT_TOKEN"] : k => contains(local.integration_secret_names, k) }
+  outage_on     = !contains(var.disabled_features, "outage_detection")
+  approvals_on  = local.tier_rank >= 1 && !contains(var.disabled_features, "manager_approvals")
+  flywheel_on   = local.tier_rank >= 2 && !contains(var.disabled_features, "knowledge_flywheel")
+  reports_on    = local.tier_rank >= 2 && !contains(var.disabled_features, "executive_reports")
+  multi_turn_on = local.tier_rank >= 1 && !contains(var.disabled_features, "multi_turn")
+  enrichment_on = local.tier_rank >= 1 && !contains(var.disabled_features, "context_enrichment")
+  identity      = lower(lookup(var.extra_environment, "IDENTITY_PROVIDER", "directory_cache"))
+  webchat_on    = lower(lookup(var.extra_environment, "WEBCHAT_ENABLED", "false")) == "true"
+  has_env       = { for k in ["N8N_APPROVAL_WEBHOOK_URL", "N8N_NOTIFY_WEBHOOK_URL", "SLACK_ESCALATION_CHANNEL", "GRAPH_TENANT_ID", "GRAPH_CLIENT_ID", "OKTA_DOMAIN"] : k => contains(keys(var.extra_environment), k) }
+  has_secret    = { for k in ["N8N_OUTBOUND_SIGNING_SECRET", "N8N_CALLBACK_SECRET", "SLACK_BOT_TOKEN", "GRAPH_CLIENT_SECRET", "OKTA_API_TOKEN", "WEBCHAT_SIGNING_SECRET"] : k => contains(local.integration_secret_names, k) }
+  identity_ok = (
+    !local.enrichment_on
+    || (local.identity == "directory_cache")
+    || (local.identity == "microsoft_graph" && local.has_env["GRAPH_TENANT_ID"] && local.has_env["GRAPH_CLIENT_ID"] && local.has_secret["GRAPH_CLIENT_SECRET"])
+    || (local.identity == "okta" && local.has_env["OKTA_DOMAIN"] && local.has_secret["OKTA_API_TOKEN"])
+  )
   tier2_channel  = (local.has_env["N8N_NOTIFY_WEBHOOK_URL"] && local.has_secret["N8N_OUTBOUND_SIGNING_SECRET"]) || (local.has_env["SLACK_ESCALATION_CHANNEL"] && local.has_secret["SLACK_BOT_TOKEN"])
   approvals_ok   = local.has_env["N8N_APPROVAL_WEBHOOK_URL"] && local.has_secret["N8N_OUTBOUND_SIGNING_SECRET"] && local.has_secret["N8N_CALLBACK_SECRET"]
   tier2_ready    = local.has_env["N8N_NOTIFY_WEBHOOK_URL"] && local.has_secret["N8N_OUTBOUND_SIGNING_SECRET"]
@@ -407,7 +425,8 @@ resource "aws_security_group" "fargate_sg" {
 # ---------------------------------------------------------------------------
 
 resource "aws_lb" "agent" {
-  name                       = substr("${local.name}-alb", 0, 32)
+  # trimsuffix: a 32-character cut can land on a dash, which AWS rejects at the end of a name.
+  name                       = trimsuffix(substr("${local.name}-alb", 0, 32), "-")
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb_sg.id]
   subnets                    = aws_subnet.public[*].id
@@ -416,7 +435,7 @@ resource "aws_lb" "agent" {
 }
 
 resource "aws_lb_target_group" "agent" {
-  name                 = substr("${local.name}-tg", 0, 32)
+  name                 = trimsuffix(substr("${local.name}-tg", 0, 32), "-")
   port                 = 8000
   protocol             = "HTTP"
   target_type          = "ip"
@@ -512,8 +531,10 @@ resource "aws_lb_listener" "http_redirect" {
 # ---------------------------------------------------------------------------
 
 resource "aws_secretsmanager_secret" "agent" {
-  name                    = "${local.name}/runtime"
-  recovery_window_in_days = 7
+  name = "${local.name}/runtime"
+  # Deleted at once on destroy: every value can be recreated from the deploy env
+  # file, and a pending-deletion secret would block redeploying the same client.
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "agent" {
@@ -647,8 +668,16 @@ resource "aws_ecs_task_definition" "agent_task" {
       error_message = "llm_provider = anthropic requires llm_api_key."
     }
     precondition {
-      condition     = !local.outage_on || local.tier2_channel
-      error_message = "Outage detection needs a Tier 2 channel: N8N_NOTIFY_WEBHOOK_URL (extra_environment) + N8N_OUTBOUND_SIGNING_SECRET, or SLACK_ESCALATION_CHANNEL + SLACK_BOT_TOKEN (integration_secrets)."
+      condition     = !(local.outage_on || local.multi_turn_on || local.approvals_on) || local.tier2_channel
+      error_message = "Outage detection, multi-turn threads and approvals all need a Tier 2 channel: N8N_NOTIFY_WEBHOOK_URL (extra_environment) + N8N_OUTBOUND_SIGNING_SECRET, or SLACK_ESCALATION_CHANNEL + SLACK_BOT_TOKEN (integration_secrets)."
+    }
+    precondition {
+      condition     = local.identity_ok
+      error_message = "IDENTITY_PROVIDER=microsoft_graph needs GRAPH_TENANT_ID and GRAPH_CLIENT_ID (extra_environment) and GRAPH_CLIENT_SECRET (integration_secrets). IDENTITY_PROVIDER=okta needs OKTA_DOMAIN (extra_environment) and OKTA_API_TOKEN (integration_secrets). Any other value must be directory_cache."
+    }
+    precondition {
+      condition     = !local.webchat_on || local.has_secret["WEBCHAT_SIGNING_SECRET"]
+      error_message = "WEBCHAT_ENABLED=true needs WEBCHAT_SIGNING_SECRET (integration_secrets)."
     }
     precondition {
       condition     = !local.approvals_on || local.approvals_ok

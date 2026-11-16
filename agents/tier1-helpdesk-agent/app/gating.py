@@ -62,6 +62,26 @@ def require_tenant(tenant_id: str) -> None:
         raise HTTPException(status_code=403, detail="tenant not served by this deployment")
 
 
+def require_webchat_enabled() -> None:
+    """The public website chat is off unless the deployment turns it on (404, like a locked tier)."""
+    if not get_settings().webchat_enabled:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+async def require_webchat_signature(request: Request) -> bytes:
+    """Verify a request from the company website's server. Returns the body."""
+    settings = get_settings()
+    body = await request.body()
+    if not signing.verify(
+        settings.webchat_signing_secret.get_secret_value(),
+        body,
+        request.headers.get(signing.SIGNATURE_HEADER, ""),
+        settings.webhook_signature_max_skew_seconds,
+    ):
+        raise HTTPException(status_code=401, detail="invalid signature")
+    return body
+
+
 async def require_n8n_signature(request: Request) -> bytes:
     """Verify an inbound n8n callback (HMAC over timestamp + raw body). Returns the body."""
     settings = get_settings()

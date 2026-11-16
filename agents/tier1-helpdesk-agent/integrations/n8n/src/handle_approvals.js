@@ -2,9 +2,15 @@
 //   approval.requested     -> DM the approver an interactive card, tell the requester
 //   provisioning.requested -> add the requester to the item's group (Entra ID / Okta)
 //   approval.denied        -> tell the requester
+//
+// Output: one item { ok, status, ... } for the Respond node, which answers the
+// agent AFTER the work is done. The agent treats 2xx as "delivered", so 200 is
+// only returned once Slack (or the directory) accepted the request; any failure
+// is a 502 and the agent retries or escalates.
 const helpers = this.helpers;
-const { ok, envelope } = $input.first().json;
-if (!ok || !envelope) return [];
+const input = $input.first().json;
+if (!input.ok || !input.envelope) return [{ json: { ok: false, status: input.status || 401 } }];
+const envelope = input.envelope;
 const event = envelope.event;
 
 async function graphToken() {
@@ -33,19 +39,23 @@ async function addToEntraGroup(groupId, email) {
     headers: auth,
     json: true,
   });
-  try {
-    await helpers.httpRequest({
-      method: 'POST',
-      url: `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(groupId)}/members/$ref`,
-      headers: { ...auth, 'Content-Type': 'application/json' },
-      body: { '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${user.id}` },
-      json: true,
-    });
-  } catch (err) {
-    // Already a member counts as success.
-    const text = JSON.stringify((err && (err.response || err.cause || err.message)) || '');
-    if (!/already exist/i.test(text)) throw err;
-  }
+  // Ask for the full response: n8n's thrown HTTP errors don't carry the body,
+  // and Graph reports "already a member" as a 400 with a message.
+  const res = await helpers.httpRequest({
+    method: 'POST',
+    url: `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(groupId)}/members/$ref`,
+    headers: { ...auth, 'Content-Type': 'application/json' },
+    body: { '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${user.id}` },
+    json: true,
+    returnFullResponse: true,
+    ignoreHttpStatusErrors: true,
+  });
+  const status = Number(res && res.statusCode);
+  if (status >= 200 && status < 300) return;
+  const body = res && res.body;
+  const message = (body && body.error && body.error.message) || (typeof body === 'string' ? body : '') || '';
+  if (status === 400 && /already exist/i.test(message)) return; // already a member counts as success
+  throw new Error(`Graph add-to-group failed: ${status} ${truncate(message, 200)}`);
 }
 
 async function addToOktaGroup(groupId, email) {
@@ -71,12 +81,12 @@ function approvalCard(e) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Approval needed:* ${e.item_display_name}${cost}\n*Requested by:* ${e.requester_email}\n` +
-          `*Ticket:* ${e.ticket_id}`,
+        text: `*Approval needed:* ${slackEscape(e.item_display_name)}${cost}\n` +
+          `*Requested by:* ${slackEscape(e.requester_email)}\n*Ticket:* ${slackEscape(e.ticket_id)}`,
       },
     },
     ...(e.justification ? [{
-      type: 'section', text: { type: 'mrkdwn', text: `*Reason:*\n>${truncate(e.justification, 1500)}` },
+      type: 'section', text: { type: 'mrkdwn', text: `*Reason:*\n>${slackEscape(truncate(e.justification, 1500)).replace(/\n/g, '\n>')}` },
     }] : []),
     {
       type: 'context',
@@ -91,7 +101,7 @@ function approvalCard(e) {
           text: { type: 'plain_text', text: 'Approve' }, value: value('approved'),
           confirm: {
             title: { type: 'plain_text', text: 'Approve this request?' },
-            text: { type: 'mrkdwn', text: `${e.requester_email} will get ${e.item_display_name}.` },
+            text: { type: 'mrkdwn', text: `${slackEscape(e.requester_email)} will get ${slackEscape(e.item_display_name)}.` },
             confirm: { type: 'plain_text', text: 'Approve' },
             deny: { type: 'plain_text', text: 'Cancel' },
           },
@@ -105,41 +115,60 @@ function approvalCard(e) {
   ];
 }
 
-if (event === 'approval.requested') {
-  await dm(helpers, envelope.approver_email,
-    `Approval needed: ${envelope.item_display_name} for ${envelope.requester_email}`, approvalCard(envelope));
-  return [{ json: { done: event, approval_id: envelope.approval_id } }];
-}
-
-if (event === 'provisioning.requested') {
-  const provider = env('PROVISIONING_PROVIDER', 'none').toLowerCase();
-  const group = envelope.provisioning_group;
-  try {
-    if (!group || provider === 'none') {
-      throw new Error(group ? 'PROVISIONING_PROVIDER is none' : 'catalog item has no provisioning_group');
-    }
-    if (provider === 'entra') await addToEntraGroup(group, envelope.requester_email);
-    else if (provider === 'okta') await addToOktaGroup(group, envelope.requester_email);
-    else throw new Error(`unknown PROVISIONING_PROVIDER ${provider}`);
-    await dm(helpers, envelope.requester_email,
-      `✅ ${envelope.item_display_name} is being set up for you. It usually appears within the hour. ` +
-      `(Ticket ${envelope.ticket_id})`);
-    return [{ json: { done: event, provisioned: true } }];
-  } catch (err) {
-    await postToChannel(helpers, env('SLACK_ALERT_CHANNEL'),
-      `:warning: Manual provisioning needed for ${envelope.tenant_id}: add ${envelope.requester_email} ` +
-      `to ${envelope.item_display_name} (group ${group || 'n/a'}). Ticket ${envelope.ticket_id}. ` +
-      `Reason: ${truncate(err.message, 300)}`);
-    return [{ json: { done: event, provisioned: false, error: err.message } }];
+async function handle() {
+  if (event === 'approval.requested') {
+    await dm(helpers, envelope.approver_email,
+      `Approval needed: ${envelope.item_display_name} for ${envelope.requester_email}`, approvalCard(envelope));
+    return { done: event, approval_id: envelope.approval_id };
   }
+
+  if (event === 'provisioning.requested') {
+    const provider = env('PROVISIONING_PROVIDER', 'none').toLowerCase();
+    const group = envelope.provisioning_group;
+    try {
+      if (!group || provider === 'none') {
+        throw new Error(group ? 'PROVISIONING_PROVIDER is none' : 'catalog item has no provisioning_group');
+      }
+      if (provider === 'entra') await addToEntraGroup(group, envelope.requester_email);
+      else if (provider === 'okta') await addToOktaGroup(group, envelope.requester_email);
+      else throw new Error(`unknown PROVISIONING_PROVIDER ${provider}`);
+    } catch (err) {
+      // Technicians finish it by hand. If even this alert can't be posted, the
+      // error propagates, the agent gets a 502 and escalates the ticket itself.
+      await postToChannel(helpers, env('SLACK_ALERT_CHANNEL'),
+        `:warning: Manual provisioning needed for ${slackEscape(envelope.tenant_id)}: add ` +
+        `${slackEscape(envelope.requester_email)} to ${slackEscape(envelope.item_display_name)} ` +
+        `(group ${slackEscape(group || 'n/a')}). Ticket ${slackEscape(envelope.ticket_id)}. ` +
+        `Reason: ${slackEscape(truncate(err.message, 300))}`);
+      return { done: event, provisioned: false, error: err.message };
+    }
+    // The access is granted. Telling the requester is a courtesy: a person who
+    // isn't in Slack (a Jira or Teams ticket) must not turn success into an alert.
+    let requester_notified = true;
+    try {
+      await dm(helpers, envelope.requester_email,
+        `✅ ${slackEscape(envelope.item_display_name)} is being set up for you. It usually appears within ` +
+        `the hour. (Ticket ${slackEscape(envelope.ticket_id)})`);
+    } catch (err) {
+      requester_notified = false;
+    }
+    return { done: event, provisioned: true, requester_notified };
+  }
+
+  if (event === 'approval.denied') {
+    const note = envelope.decision_note
+      ? ` Note from your manager: "${slackEscape(truncate(envelope.decision_note, 500))}"` : '';
+    await dm(helpers, envelope.requester_email,
+      `Your request for ${slackEscape(envelope.item_display_name)} wasn't approved.${note} ` +
+      `Reply to the help desk if you have questions. (Ticket ${slackEscape(envelope.ticket_id)})`);
+    return { done: event };
+  }
+
+  return { ignored: event };
 }
 
-if (event === 'approval.denied') {
-  const note = envelope.decision_note ? ` Note from your manager: "${truncate(envelope.decision_note, 500)}"` : '';
-  await dm(helpers, envelope.requester_email,
-    `Your request for ${envelope.item_display_name} wasn't approved.${note} ` +
-    `Reply to the help desk if you have questions. (Ticket ${envelope.ticket_id})`);
-  return [{ json: { done: event } }];
+try {
+  return [{ json: { ok: true, status: 200, ...(await handle()) } }];
+} catch (err) {
+  return [{ json: { ok: false, status: 502, done: event, error: truncate(String((err && err.message) || err), 300) } }];
 }
-
-return [{ json: { ignored: event } }];

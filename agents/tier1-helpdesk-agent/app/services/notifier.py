@@ -68,7 +68,10 @@ async def notify_tier2(
             resp = await _client().post(
                 "https://slack.com/api/chat.postMessage",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"channel": settings.slack_escalation_channel, "text": text},
+                # Escape Slack control characters: the text carries requester-written
+                # content, which must not be able to ping <!channel> or forge links.
+                json={"channel": settings.slack_escalation_channel,
+                      "text": text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")},
             )
             if resp.status_code == 200 and resp.json().get("ok"):
                 return True

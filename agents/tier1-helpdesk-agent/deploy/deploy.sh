@@ -8,6 +8,11 @@
 #   add --skip-smoke to skip the final HTTPS smoke test
 #   deploy/deploy.sh <client>.env --destroy  # tear down AWS resources (asks you to type the client slug)
 #
+# Helpers that need no AWS access (they create and use deploy/.venv):
+#   deploy/deploy.sh <client>.env --check              # validate the env file only
+#   deploy/deploy.sh <client>.env --ping-n8n           # can the agent reach n8n, and do the secrets match?
+#   deploy/deploy.sh <client>.env --sync-sops [--prune]  # re-load SOP_DIR (and WEBCHAT_SOP_DIR) after editing SOPs
+#
 # Steps (idempotent, so re-running is safe; it stops at the first error):
 #   1  preflight: tools, AWS identity, deploy.env validated by the app's own config rules
 #   2  Terraform state bucket (S3, versioned, encrypted, private) + terraform init
@@ -17,6 +22,8 @@
 #   6  wait for the service to be stable
 #   7  load SOPs / catalog / directory, import n8n workflows (if configured)
 #   8  smoke test over HTTPS, then print the remaining manual steps
+# Before step 3 it lists what it is about to change and asks once; the full
+# infrastructure plan is shown, and confirmed again, before step 5 applies it.
 #
 # Secrets never go on the command line or into the repo: they are written to a
 # temporary 600-mode Terraform variables file that is deleted on exit. Terraform
@@ -33,13 +40,21 @@ PLAN_ONLY=0
 ASSUME_YES=0
 SKIP_SMOKE=0
 DESTROY=0
+CHECK_ONLY=0
+PING_N8N=0
+SYNC_SOPS=0
+PRUNE=0
 for arg in "$@"; do
   case "$arg" in
     --plan) PLAN_ONLY=1 ;;
     --yes|-y) ASSUME_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     --destroy) DESTROY=1 ;;
-    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+    --check) CHECK_ONLY=1 ;;
+    --ping-n8n) PING_N8N=1 ;;
+    --sync-sops) SYNC_SOPS=1 ;;
+    --prune) PRUNE=1 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) ENV_FILE="$arg" ;;
   esac
@@ -65,10 +80,17 @@ TFVARS="$WORK/deploy.tfvars.json"
 # ---------------------------------------------------------------------------
 bold "1/8 Preflight"
 # ---------------------------------------------------------------------------
-for tool in aws terraform docker python3 git; do
+HELPER_ONLY=$(( CHECK_ONLY + PING_N8N + SYNC_SOPS ))
+if [[ $HELPER_ONLY -gt 0 ]]; then
+  required_tools=(python3 git)   # helper modes don't touch AWS
+else
+  required_tools=(aws terraform docker python3 git)
+fi
+for tool in "${required_tools[@]}"; do
   command -v "$tool" >/dev/null || die "'$tool' is not installed (see deploy/DEPLOY.md, prerequisites)"
 done
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || die "python3 >= 3.11 required"
+if [[ $HELPER_ONLY -eq 0 ]]; then
 tf_version="$(terraform version -json | python3 -c 'import json,sys; print(json.load(sys.stdin)["terraform_version"])')"
 python3 - "$tf_version" <<'PY' || die "Terraform >= 1.10 required (found $tf_version)"
 import sys
@@ -76,9 +98,13 @@ major, minor = (int(x) for x in sys.argv[1].split(".")[:2])
 sys.exit(0 if (major, minor) >= (1, 10) else 1)
 PY
 docker buildx version >/dev/null 2>&1 || die "docker buildx is required (Docker Desktop, or the buildx plugin)"
-if ! docker buildx inspect --bootstrap 2>/dev/null | grep -q "linux/arm64"; then
+# Captured first: piping straight into `grep -q` can kill buildx with SIGPIPE,
+# which pipefail would report as "can't build arm64".
+builder_info="$(docker buildx inspect --bootstrap 2>/dev/null || true)"
+if [[ "$builder_info" != *"linux/arm64"* ]]; then
   die "this Docker builder can't build linux/arm64 images. On Linux run once:
        docker run --privileged --rm tonistiigi/binfmt --install arm64"
+fi
 fi
 
 perm="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE")"
@@ -100,12 +126,43 @@ PY="$VENV/bin/python"
 cfg() { "$PY" "$HERE/render_config.py" "$ENV_FILE" --get "$1"; }
 
 "$PY" "$HERE/render_config.py" "$ENV_FILE" --check || die "fix deploy.env and re-run"
+[[ $CHECK_ONLY -eq 1 ]] && exit 0
 
 REGION="$(cfg AWS_REGION)"
 CLIENT="$(cfg CLIENT_SLUG)"
 HOSTNAME_="$(cfg PUBLIC_HOSTNAME)"
 TIER="$(cfg SERVICE_TIER)"; TIER="${TIER:-TIER_0_INCENTIVE}"
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
+
+# Loads SOP_DIR for the client, and WEBCHAT_SOP_DIR for the website chat's own
+# tenant. Talks to Supabase and Voyage directly with the keys from deploy.env.
+sync_sops() {
+  export SUPABASE_URL SUPABASE_SERVICE_KEY VOYAGE_API_KEY
+  SUPABASE_URL="$(cfg SUPABASE_URL)"; SUPABASE_SERVICE_KEY="$(cfg SUPABASE_SERVICE_KEY)"; VOYAGE_API_KEY="$(cfg VOYAGE_API_KEY)"
+  local prune_args=() sop_dir web_dir web_tenant
+  [[ $PRUNE -eq 1 ]] && prune_args=(--prune)
+  sop_dir="$(cfg SOP_DIR)"
+  if [[ -n "$sop_dir" ]]; then
+    ( cd "$ROOT" && "$PY" -m ingest.sync_docs --tenant "$CLIENT" --docs "$sop_dir" ${prune_args[@]+"${prune_args[@]}"} )
+  fi
+  web_dir="$(cfg WEBCHAT_SOP_DIR)"
+  if [[ -n "$web_dir" ]]; then
+    web_tenant="$(cfg WEBCHAT_TENANT_ID)"; web_tenant="${web_tenant:-web-demo}"
+    ( cd "$ROOT" && "$PY" -m ingest.sync_docs --tenant "$web_tenant" --docs "$web_dir" ${prune_args[@]+"${prune_args[@]}"} )
+  fi
+  if [[ -z "$sop_dir" && -z "$web_dir" ]]; then note "SOP_DIR and WEBCHAT_SOP_DIR are both empty: nothing to load"; fi
+}
+
+if [[ $SYNC_SOPS -eq 1 ]]; then
+  bold "Syncing SOPs"
+  sync_sops
+  exit 0
+fi
+if [[ $PING_N8N -eq 1 ]]; then
+  bold "Checking n8n"
+  "$PY" "$HERE/n8n_ping.py" "$ENV_FILE" || die "the agent can't deliver to n8n (see the hints above and integrations/n8n/LOCAL_N8N.md)"
+  exit 0
+fi
 
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)" || die "AWS credentials not working (aws sts get-caller-identity)"
 CALLER="$(aws sts get-caller-identity --query Arn --output text)"
@@ -114,7 +171,8 @@ note "client $CLIENT, tier $TIER, https://$HOSTNAME_"
 
 # Immutable image tag: the commit, plus a timestamp if the tree has local changes.
 TAG="$(git -C "$ROOT" rev-parse --short=12 HEAD)"
-if [[ -n "$(git -C "$ROOT" status --porcelain -- . ':!deploy/*.env' 2>/dev/null)" ]]; then
+# (Terraform's lock file and the deploy env files are local, not part of the image.)
+if [[ -n "$(git -C "$ROOT" status --porcelain -- . ':!deploy/*.env' ':!terraform/.terraform.lock.hcl' 2>/dev/null)" ]]; then
   TAG="$TAG-dirty-$(date -u +%Y%m%d%H%M%S)"
   note "uncommitted changes: image tag $TAG"
 fi
@@ -136,7 +194,9 @@ if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   note "state bucket s3://$BUCKET exists"
 else
   [[ $DESTROY -eq 1 ]] && die "no state bucket s3://$BUCKET, so there's nothing deployed to destroy in this account/region"
-  [[ $PLAN_ONLY -eq 1 ]] && die "state bucket s3://$BUCKET doesn't exist yet. Run without --plan once to create it (nothing else is applied without confirmation)."
+  # A first --plan needs somewhere to keep state too. The bucket is the only
+  # thing --plan ever creates, and only after you agree.
+  [[ $PLAN_ONLY -eq 1 ]] && note "first run: Terraform needs a state bucket before it can plan"
   confirm "Create private, encrypted, versioned state bucket s3://$BUCKET?"
   if [[ "$REGION" == "us-east-1" ]]; then
     aws s3api create-bucket --bucket "$BUCKET" >/dev/null
@@ -167,7 +227,7 @@ if [[ $DESTROY -eq 1 ]]; then
   [[ "$answer" == "$CLIENT" ]] || die "confirmation didn't match; nothing was destroyed"
   terraform -chdir="$TF_DIR" apply -input=false "$WORK/destroy.tfplan"
   bold "Destroyed $CLIENT"
-  note "Secrets Manager keeps the secret 7 days (restore-secret, or delete with --force-delete-without-recovery)."
+  note "The state bucket, the ECR images' history and all Supabase data are kept."
   exit 0
 fi
 
@@ -178,10 +238,17 @@ if [[ $PLAN_ONLY -eq 1 ]]; then
   exit 0
 fi
 
+# Everything up to here only read. Say what changes next, before any of it happens.
+DB_URL="$(cfg SUPABASE_DB_URL)"
+note "About to, in this order:"
+if [[ -n "$DB_URL" ]]; then note "  - apply supabase/migrations/001_init_schema.sql to your Supabase database (safe to repeat)"; fi
+note "  - create the ECR repository (if new) and push image tag $TAG"
+note "  - show the full infrastructure plan and ask again before applying it"
+confirm "Go ahead?"
+
 # ---------------------------------------------------------------------------
 bold "3/8 Database schema"
 # ---------------------------------------------------------------------------
-DB_URL="$(cfg SUPABASE_DB_URL)"
 if [[ -n "$DB_URL" ]]; then
   command -v psql >/dev/null || die "SUPABASE_DB_URL is set but 'psql' isn't installed (or clear it and use the SQL editor)"
   if ! PGCONNECT_TIMEOUT=15 psql "$DB_URL" -v ON_ERROR_STOP=1 -q \
@@ -190,8 +257,8 @@ if [[ -n "$DB_URL" ]]; then
     die "the schema migration failed (output above)"
   fi
   PGCONNECT_TIMEOUT=15 psql "$DB_URL" -tA -v ON_ERROR_STOP=1 -c \
-    "select count(*) from pg_proc where proname in ('match_sop_chunks','try_reserve_llm_budget','register_outage_cluster')" \
-    | grep -qx 3 || die "schema check failed after applying the migration"
+    "select count(distinct proname) from pg_proc where proname in ('match_sop_chunks','try_reserve_llm_budget','register_outage_cluster','webchat_consume','try_acquire_maintenance_lease')" \
+    | grep -qx 5 || die "schema check failed after applying the migration"
   note "schema applied and verified (idempotent)"
 else
   note "SUPABASE_DB_URL not set: make sure supabase/migrations/001_init_schema.sql has been run in the Supabase SQL editor"
@@ -207,6 +274,13 @@ REPO_URL="$(terraform -chdir="$TF_DIR" output -raw ecr_repository_url)"
 REPO_NAME="${REPO_URL#*/}"
 if aws ecr describe-images --repository-name "$REPO_NAME" --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
   note "image $REPO_URL:$TAG already pushed"
+elif [[ -n "$OVERRIDE_TAG" ]]; then
+  # IMAGE_TAG means "run that existing image" (a rollback). Building the current
+  # tree under an old tag would deploy the wrong code and, because tags are
+  # immutable, keep that tag pointing at it for good.
+  die "IMAGE_TAG=$OVERRIDE_TAG isn't in ECR (mistyped, or expired by the keep-10 rule). Available tags:
+       aws ecr describe-images --repository-name $REPO_NAME --query 'imageDetails[].imageTags[]' --output text
+       Remove IMAGE_TAG from the env file to build and deploy the current code instead."
 else
   aws ecr get-login-password | docker login --username AWS --password-stdin "${REPO_URL%%/*}" >/dev/null
   note "building linux/arm64 image (first build takes a few minutes)"
@@ -235,13 +309,7 @@ note "ECS service $SERVICE is stable"
 # ---------------------------------------------------------------------------
 bold "7/8 Knowledge and integrations"
 # ---------------------------------------------------------------------------
-# The loaders talk to Supabase directly with the service key from deploy.env.
-export SUPABASE_URL SUPABASE_SERVICE_KEY VOYAGE_API_KEY
-SUPABASE_URL="$(cfg SUPABASE_URL)"; SUPABASE_SERVICE_KEY="$(cfg SUPABASE_SERVICE_KEY)"; VOYAGE_API_KEY="$(cfg VOYAGE_API_KEY)"
-SOP_DIR="$(cfg SOP_DIR)"
-if [[ -n "$SOP_DIR" ]]; then
-  ( cd "$ROOT" && "$PY" -m ingest.sync_docs --tenant "$CLIENT" --docs "$SOP_DIR" )
-fi
+sync_sops
 CATALOG="$(cfg CATALOG_CSV)"; DIRECTORY="$(cfg DIRECTORY_CSV)"
 loader_args=()
 [[ -n "$CATALOG" ]] && loader_args+=(--catalog "$CATALOG")
@@ -266,15 +334,19 @@ fi
 bold "8/8 Smoke test"
 # ---------------------------------------------------------------------------
 if [[ $SKIP_SMOKE -eq 1 ]]; then
-  note "skipped (--skip-smoke). Run later: $PY $HERE/smoke_test.py --host $HOSTNAME_ --tenant $CLIENT --tier $TIER --secret ..."
+  note "skipped (--skip-smoke). Run later: SMOKE_WEBHOOK_SECRET=... $PY $HERE/smoke_test.py --host $HOSTNAME_ --tenant $CLIENT --tier $TIER"
 else
 connect_args=()
 if ! python3 -c "import socket,sys; socket.gethostbyname(sys.argv[1])" "$HOSTNAME_" 2>/dev/null; then
   note "$HOSTNAME_ doesn't resolve yet, so testing through the load balancer directly"
   connect_args=(--connect "$ALB_DNS")
 fi
-"$PY" "$HERE/smoke_test.py" --host "$HOSTNAME_" --secret "$(cfg WEBHOOK_SECRET)" --tenant "$CLIENT" \
-  --tier "$TIER" ${connect_args[@]+"${connect_args[@]}"} || die "smoke test failed. Logs: aws logs tail /ecs/$CLIENT-tier1-agent --since 15m"
+webchat_state=off
+case "$(cfg WEBCHAT_ENABLED | tr '[:upper:]' '[:lower:]')" in true|1|yes) webchat_state=on ;; esac
+# The secret goes through the environment, not the command line (visible in `ps`).
+SMOKE_WEBHOOK_SECRET="$(cfg WEBHOOK_SECRET)" "$PY" "$HERE/smoke_test.py" --host "$HOSTNAME_" --tenant "$CLIENT" \
+  --tier "$TIER" --disabled-features "$(cfg DISABLED_FEATURES)" --webchat "$webchat_state" \
+  ${connect_args[@]+"${connect_args[@]}"} || die "smoke test failed. Logs: aws logs tail /ecs/$CLIENT-tier1-agent --since 15m"
 fi
 
 bold "Deployed"

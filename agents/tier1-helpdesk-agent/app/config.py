@@ -85,6 +85,14 @@ class IdentityProviderKind(str, Enum):
     OKTA = "okta"
 
 
+# USD per million tokens: (input, output).
+DEFAULT_MODEL_PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    "claude-sonnet-5": (2.00, 10.00),
+}
+
+
 def _split_csv(value: Any) -> Any:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
@@ -140,7 +148,9 @@ class Settings(BaseSettings):
     flywheel_effort: str = Field("medium", pattern="^(low|medium|high|xhigh|max)$")
     # Server-side refusal fallback on the Sonnet route (Claude API only).
     enable_refusal_fallbacks: bool = True
-    llm_timeout_seconds: float = Field(60.0, gt=0, le=600)
+    # The SDK makes up to 3 attempts. 3 x this must stay under the 15 minutes
+    # a budget reservation counts for, or the cap could be overspent.
+    llm_timeout_seconds: float = Field(60.0, gt=0, le=240)
 
     # --- Token caps (max_tokens includes thinking tokens) ---------------------
     triage_max_tokens: int = Field(4096, ge=1024, le=32000)
@@ -158,11 +168,8 @@ class Settings(BaseSettings):
     tenant_budget_overrides_usd: dict[str, float] = {}
     # USD per million tokens: (input, output). Cache reads bill at 0.1x input,
     # cache writes at 1.25x.
-    model_prices_per_mtok: dict[str, tuple[float, float]] = {
-        "claude-haiku-5-5": (0.10, 0.50),
-        "claude-sonnet-5-5": (2.00, 10.00),
-        "claude-sonnet-5": (2.00, 10.00),
-    }
+    # An override is merged over these defaults (it never removes a model).
+    model_prices_per_mtok: dict[str, tuple[float, float]] = dict(DEFAULT_MODEL_PRICES_PER_MTOK)
     # Input tokens assumed per image when reserving budget before a vision call.
     reserve_tokens_per_image: int = Field(1600, ge=100)
 
@@ -194,6 +201,8 @@ class Settings(BaseSettings):
     outage_window_minutes: int = Field(30, ge=5, le=240)
     outage_min_matching_tickets: int = Field(5, ge=2, le=100)
     outage_similarity_threshold: float = Field(0.88, ge=0.5, le=0.999)
+    # A cluster must come from at least this many different people.
+    outage_min_distinct_reporters: int = Field(3, ge=1, le=100)
 
     # --- Tier 0: ROI telemetry ------------------------------------------------
     minutes_saved_per_deflection: int = Field(15, ge=0, le=480)
@@ -231,6 +240,21 @@ class Settings(BaseSettings):
     flywheel_gap_similarity_threshold: float = Field(0.82, ge=0.5, le=0.99)
     flywheel_min_resolution_chars: int = Field(80, ge=20)
 
+    # --- Public website chat (free trial; off unless enabled) -----------------
+    # The company website's server signs every request; browsers never call this
+    # API directly. Usage is counted in the database before any model call.
+    webchat_enabled: bool = False
+    webchat_tenant_id: str = Field("web-demo", pattern=r"^[a-z0-9-]{2,64}$")  # its own SOPs and budget
+    webchat_signing_secret: SecretStr = SecretStr("")
+    webchat_visitor_free_uses: int = Field(5, ge=0, le=100)  # questions before sign-up is required
+    webchat_ip_daily_free_uses: int = Field(15, ge=1, le=10000)  # anonymous questions per network per day
+    # Questions per calendar month by plan. Beyond it, purchased credits are spent.
+    webchat_plan_monthly_limits: dict[str, int] = {"free": 20, "starter": 250}
+    webchat_monthly_budget_usd: float = Field(10.0, ge=0)  # hard model-spend cap for the whole website chat
+    webchat_max_message_chars: int = Field(1000, ge=50, le=4000)
+    webchat_signup_url: str = ""
+    webchat_upgrade_url: str = ""
+
     # --- Chat integrations (unchanged) ----------------------------------------
     slack_bot_token: SecretStr = SecretStr("")
     slack_signing_secret: SecretStr = SecretStr("")
@@ -260,6 +284,16 @@ class Settings(BaseSettings):
     def _normalise_hosts(cls, value: list[str]) -> list[str]:
         return [h.lower().lstrip(".") for h in value]
 
+    @field_validator("vip_job_title_keywords")
+    @classmethod
+    def _lower_keywords(cls, value: list[str]) -> list[str]:
+        return [k.lower() for k in value]
+
+    @field_validator("model_prices_per_mtok")
+    @classmethod
+    def _merge_prices(cls, value: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
+        return {**DEFAULT_MODEL_PRICES_PER_MTOK, **value}
+
     @model_validator(mode="after")
     def _default_tenants(self) -> "Settings":
         if not self.allowed_tenant_ids and self.tenant_id:
@@ -288,7 +322,9 @@ class Settings(BaseSettings):
         return tenant_id in self.allowed_tenant_ids
 
     def budget_for(self, tenant_id: str) -> float:
-        return self.tenant_budget_overrides_usd.get(tenant_id, self.monthly_token_budget_usd)
+        default = (self.webchat_monthly_budget_usd if tenant_id == self.webchat_tenant_id
+                   else self.monthly_token_budget_usd)
+        return self.tenant_budget_overrides_usd.get(tenant_id, default)
 
     def provider_model_id(self, model: str) -> str:
         """The model ID as the configured provider expects it."""
@@ -298,8 +334,12 @@ class Settings(BaseSettings):
 
     def price_for(self, model: str) -> tuple[float, float]:
         base = model.removeprefix(self.bedrock_model_prefix)
-        # Unknown models (e.g. a fallback) are priced like the costliest known one.
-        return self.model_prices_per_mtok.get(base) or max(self.model_prices_per_mtok.values())
+        return self.model_prices_per_mtok.get(base) or self.highest_price()
+
+    def highest_price(self) -> tuple[float, float]:
+        """Unknown models (e.g. a fallback) are priced at the highest known input and output rates."""
+        prices = self.model_prices_per_mtok.values()
+        return max(p[0] for p in prices), max(p[1] for p in prices)
 
     # --- Startup validation ---------------------------------------------------
 
@@ -320,9 +360,11 @@ class Settings(BaseSettings):
         if self.llm_provider is LLMProvider.ANTHROPIC:
             required["ANTHROPIC_API_KEY / LLM_API_KEY"] = self.anthropic_api_key.get_secret_value()
 
-        if self.feature_enabled(Feature.OUTAGE_DETECTION) and not self.tier2_channel_configured():
-            # Outage broadcasts skip per-ticket escalation only because the parent
-            # incident is sent to Tier 2, so a delivery channel is mandatory.
+        needs_tier2_channel = any(self.feature_enabled(f) for f in (
+            Feature.OUTAGE_DETECTION, Feature.MULTI_TURN, Feature.MANAGER_APPROVALS))
+        if needs_tier2_channel and not self.tier2_channel_configured():
+            # Outage broadcasts, escalated threads and expired approvals are only
+            # safe because Tier 2 is told about them, so a delivery channel is mandatory.
             required["N8N_NOTIFY_WEBHOOK_URL+N8N_OUTBOUND_SIGNING_SECRET or SLACK_BOT_TOKEN+SLACK_ESCALATION_CHANNEL"] = None
 
         if self.feature_enabled(Feature.CONTEXT_ENRICHMENT):
@@ -345,6 +387,13 @@ class Settings(BaseSettings):
             required["N8N_OUTBOUND_SIGNING_SECRET"] = self.n8n_outbound_signing_secret.get_secret_value()
         if self.feature_enabled(Feature.KNOWLEDGE_FLYWHEEL):
             required["N8N_CALLBACK_SECRET"] = self.n8n_callback_secret.get_secret_value()  # draft approvals
+
+        if self.webchat_enabled:
+            secret = self.webchat_signing_secret.get_secret_value()
+            required["WEBCHAT_SIGNING_SECRET (32+ characters)"] = secret if len(secret) >= 32 else ""
+            if self.webchat_tenant_id in self.allowed_tenant_ids:
+                # The public chat must never share a tenant (SOPs, budget, tickets) with a client.
+                required["WEBCHAT_TENANT_ID different from every client tenant"] = None
 
         return [name for name, value in required.items() if not value]
 

@@ -36,7 +36,11 @@ def verify(secret: str, body: bytes, header: str, max_skew_seconds: int, now: fl
         provided = parts["v1"]
     except (ValueError, KeyError):
         return False
-    if abs((now if now is not None else time.time()) - ts) > max_skew_seconds:
+    try:
+        if abs((now if now is not None else time.time()) - ts) > max_skew_seconds:
+            return False
+    except OverflowError:  # an absurdly large timestamp
         return False
     expected = hmac.new(secret.encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, provided)
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str input.
+    return hmac.compare_digest(expected.encode(), provided.encode())

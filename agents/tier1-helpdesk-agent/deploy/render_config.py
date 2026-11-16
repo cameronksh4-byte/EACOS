@@ -63,12 +63,13 @@ EXTRA_ENVIRONMENT = [
     "TRIAGE_MODEL", "VISION_MODEL", "REASONING_MODEL", "FLYWHEEL_MODEL",
 ]
 # Deploy-script-only keys (not sent to Terraform).
-DEPLOY_ONLY = {"SUPABASE_DB_URL", "SOP_DIR", "CATALOG_CSV", "DIRECTORY_CSV", "N8N_API_URL", "N8N_API_KEY",
+DEPLOY_ONLY = {"SUPABASE_DB_URL", "SOP_DIR", "WEBCHAT_SOP_DIR", "CATALOG_CSV", "DIRECTORY_CSV", "N8N_API_URL", "N8N_API_KEY",
                "N8N_PUBLIC_URL", "N8N_SLACK_ALERT_CHANNEL", "N8N_SLACK_SOP_REVIEW_CHANNEL", "N8N_SLACK_EXEC_CHANNEL",
                "N8N_PROVISIONING_PROVIDER", "N8N_GRAPH_CLIENT_ID", "N8N_GRAPH_CLIENT_SECRET",
                "TF_STATE_BUCKET", "IMAGE_TAG"}
 
 _LINE = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
+BOOL_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -96,9 +97,37 @@ N8N_NOTIFY_PATH = "/webhook/helpdesk-notify"
 N8N_SLACK_ACTIONS_PATH = "/webhook/helpdesk-slack-actions"
 
 
+SECRET_NAME = re.compile(r"(SECRET|TOKEN|PASSWORD|API_KEY|SERVICE_KEY)")  # same rule as terraform/main.tf
+# Set by Terraform from other inputs; a value in deploy.env would be ignored.
+TERRAFORM_OWNED = {"TENANT_ID", "PUBLIC_BASE_URL"}
+
+
+def app_setting_keys() -> dict[str, bool]:
+    """Every environment variable the service reads -> whether its value is a secret."""
+    from pydantic import AliasChoices, SecretStr
+
+    from app.config import Settings
+
+    keys: dict[str, bool] = {}
+    for name, field in Settings.model_fields.items():
+        alias = field.validation_alias
+        names = list(alias.choices) if isinstance(alias, AliasChoices) else [name.upper()]
+        secret = field.annotation is SecretStr or isinstance(field.default, SecretStr)
+        for key in names:
+            keys[key] = secret
+    return keys
+
+
+def known_keys() -> set[str]:
+    return (set(TF_VARS) | set(TF_SECRETS) | set(TF_LISTS) | set(TF_NUMBERS) | set(TF_BOOLS)
+            | set(INTEGRATION_SECRETS) | set(EXTRA_ENVIRONMENT) | DEPLOY_ONLY | set(app_setting_keys()))
+
+
 def effective(cfg: dict[str, str]) -> dict[str, str]:
     """Fill values derived from others (e.g. n8n webhook URLs from N8N_PUBLIC_URL)."""
     out = dict(cfg)
+    if not out.get("SERVICE_TIER"):
+        out["SERVICE_TIER"] = "TIER_0_INCENTIVE"  # an empty value means the default, as in Terraform
     base = out.get("N8N_PUBLIC_URL", "").rstrip("/")
     if base:
         out.setdefault("N8N_APPROVAL_WEBHOOK_URL", "")
@@ -176,9 +205,28 @@ def validate(cfg: dict[str, str]) -> list[str]:
             problems.append(f"{key} is required")
     if cfg.get("CLIENT_SLUG") and not re.fullmatch(r"[a-z0-9-]{2,24}", cfg["CLIENT_SLUG"]):
         problems.append("CLIENT_SLUG must be 2-24 lowercase letters, digits or dashes")
+    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    if cfg.get("PUBLIC_HOSTNAME") and not re.fullmatch(rf"{label}(?:\.{label})+", cfg["PUBLIC_HOSTNAME"]):
+        problems.append("PUBLIC_HOSTNAME must be a bare lowercase host name like helpdesk.example.com "
+                        "(no https://, path or port)")
+    for key in TF_NUMBERS:
+        if cfg.get(key) and not re.fullmatch(r"[1-9][0-9]{0,2}", cfg[key]):
+            problems.append(f"{key} must be a whole number (got {cfg[key]!r})")
+    for key in TF_BOOLS:
+        if cfg.get(key) and cfg[key].strip().lower() not in BOOL_WORDS:
+            problems.append(f"{key} must be true or false (got {cfg[key]!r})")
+    try:
+        unknown = sorted(k for k in cfg if k not in known_keys())
+    except ImportError as exc:
+        return [f"the deploy helpers' Python packages aren't installed ({exc.name}). Run "
+                "deploy/deploy.sh <your>.env --check, which creates deploy/.venv and uses it"]
+    for key in unknown:
+        problems.append(f"{key} isn't a setting this deployment knows (typo?). Remove it or fix the name")
+    for key in sorted(TERRAFORM_OWNED & set(cfg)):
+        problems.append(f"{key} is derived automatically (from CLIENT_SLUG / PUBLIC_HOSTNAME); remove it")
     if not cfg.get("ACM_CERTIFICATE_ARN") and not cfg.get("ROUTE53_ZONE_ID"):
         problems.append("set ROUTE53_ZONE_ID (automatic certificate + DNS) or ACM_CERTIFICATE_ARN")
-    tier = cfg.get("SERVICE_TIER", "TIER_0_INCENTIVE")
+    tier = cfg.get("SERVICE_TIER") or "TIER_0_INCENTIVE"
     trial = cfg.get("TRIAL_EXPIRES_ON", "")
     if tier == "TIER_0_INCENTIVE" and not trial:
         problems.append("TIER_0 needs TRIAL_EXPIRES_ON (YYYY-MM-DD, e.g. 30 days out) or TRIAL_EXPIRES_ON=none")
@@ -204,6 +252,9 @@ def validate(cfg: dict[str, str]) -> list[str]:
         container_env.pop("ANTHROPIC_API_KEY", None)
     try:
         settings = isolated_settings(container_env)
+    except ImportError as exc:
+        problems.append(f"the deploy helpers' Python packages aren't installed ({exc.name}). Run "
+                        "deploy/deploy.sh <your>.env --check, which creates deploy/.venv and uses it")
     except Exception as exc:  # noqa: BLE001 - pydantic errors are informative
         problems.append(f"configuration rejected by the app: {exc}")
     else:
@@ -227,9 +278,19 @@ def render(cfg: dict[str, str], image_tag: str) -> dict:
             out[var] = int(cfg[key])
     for key, var in TF_BOOLS.items():
         if cfg.get(key):
-            out[var] = cfg[key].strip().lower() in ("true", "1", "yes")
+            out[var] = BOOL_WORDS[cfg[key].strip().lower()]
     out["integration_secrets"] = {k: cfg[k] for k in INTEGRATION_SECRETS if cfg.get(k)}
     out["extra_environment"] = {k: cfg[k] for k in EXTRA_ENVIRONMENT if cfg.get(k)}
+    # Every other setting the service reads is forwarded too, so what --check
+    # validated is what the container gets. Secrets, and names Terraform would
+    # take for secrets (e.g. *_MAX_TOKENS), travel through Secrets Manager.
+    handled = (set(TF_VARS) | set(TF_SECRETS) | set(TF_LISTS) | set(TF_NUMBERS) | set(TF_BOOLS)
+               | set(INTEGRATION_SECRETS) | set(EXTRA_ENVIRONMENT) | DEPLOY_ONLY | TERRAFORM_OWNED)
+    for key, secret in app_setting_keys().items():
+        if key in handled or not cfg.get(key):
+            continue
+        bucket = "integration_secrets" if secret or SECRET_NAME.search(key) else "extra_environment"
+        out[bucket][key] = cfg[key]
     if cfg.get("LLM_PROVIDER") == "bedrock":
         out.pop("llm_api_key", None)
     return out
@@ -285,7 +346,7 @@ def n8n_env_problems(env: dict[str, str]) -> list[str]:
 
 
 def generate_secrets() -> str:
-    names = ["WEBHOOK_SECRET", "N8N_OUTBOUND_SIGNING_SECRET", "N8N_CALLBACK_SECRET"]
+    names = ["WEBHOOK_SECRET", "N8N_OUTBOUND_SIGNING_SECRET", "N8N_CALLBACK_SECRET", "WEBCHAT_SIGNING_SECRET"]
     return "\n".join(f"{n}={secrets.token_urlsafe(32)}" for n in names)
 
 
@@ -328,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {p}", file=sys.stderr)
         return 2
     if args.check:
-        tier = cfg.get("SERVICE_TIER", "TIER_0_INCENTIVE")
+        tier = cfg.get("SERVICE_TIER") or "TIER_0_INCENTIVE"
         print(f"deploy.env ok: {cfg['CLIENT_SLUG']} at {tier} -> https://{cfg['PUBLIC_HOSTNAME']}")
         return 0
     if args.out:

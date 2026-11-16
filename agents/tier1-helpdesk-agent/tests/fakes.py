@@ -18,7 +18,7 @@ import httpx2
 import pytest
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
-from app.services import llm_client, notifier, rag, supabase_client
+from app.services import conversation, llm_client, notifier, rag, supabase_client
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 
@@ -39,6 +39,16 @@ def _match(row: dict, filters: dict[str, str]) -> bool:
         elif op == "gte":
             if value is None or str(value) < arg:
                 return False
+        elif op == "lt":
+            # Rows the tests insert by hand may have no timestamp: treat them as old.
+            if value is not None and not str(value) < arg:
+                return False
+        elif op == "in":
+            if str(value) not in arg.strip("()").split(","):
+                return False
+        elif op == "not" and arg == "is.null":
+            if value is None:
+                return False
         else:
             raise AssertionError(f"unsupported filter {key}={cond}")
     return True
@@ -55,6 +65,12 @@ class FakeSupabase:
         self.burst_rows: list[dict] = []
         self.incident = {"incident_id": str(uuid.uuid4()), "is_new": True, "needs_tier2_notification": True}
         self.marked: list[str] = []
+        self.pending_outages: list[dict] = []
+        self.webchat_visitors: dict[str, int] = {}
+        self.webchat_ip: dict[str, int] = {}
+        self.webchat_accounts: dict[str, dict] = {}
+        self.webchat_grants: set[str] = set()
+        self.webchat_down = False
         self.rpc_calls: list[tuple[str, dict]] = []
         self.roi = {"unique_tickets": 40, "total_triages": 52, "deflected_tickets": 22,
                     "deflection_rate_pct": 55.0, "hours_saved": 5.5, "token_cost_usd": 0.31, "outage_tickets": 6}
@@ -87,6 +103,8 @@ class FakeSupabase:
             row.setdefault("clarification_count", 0)
             row.setdefault("slots", {})
             row.setdefault("escalation_notified_at", None)
+            row.setdefault("escalation_reason", None)
+            row.setdefault("updated_at", now)
         row.setdefault("created_at", now)
         return row
 
@@ -180,6 +198,61 @@ class FakeSupabase:
             return []
         if fn == "run_housekeeping":
             return None
+        if fn == "try_acquire_maintenance_lease":
+            return True
+        if fn == "claim_pending_outage_notifications":
+            claimed = [r for r in self.pending_outages if r.get("tenant_id", params["p_tenant_id"]) == params["p_tenant_id"]]
+            self.pending_outages = [r for r in self.pending_outages if r not in claimed]
+            return claimed
+        if fn.startswith("webchat_"):
+            if self.webchat_down:
+                raise httpx.ConnectError("down")
+            return self._webchat(fn, params)
+        raise AssertionError(f"unexpected rpc {fn}")
+
+    def _webchat(self, fn, p):
+        """Mirrors webchat_consume / webchat_refund / webchat_apply_grant (tested for real in supabase/tests)."""
+        email = (p.get("p_account_email") or p.get("p_email") or "").lower() or None
+        acct = self.webchat_accounts.setdefault(email, {"plan": "free", "credits": 0, "period_uses": 0}) if email else None
+        if fn == "webchat_consume":
+            if acct is not None:
+                limit = int(p["p_plan_limits"].get(acct["plan"], 0))
+                if acct["period_uses"] < limit:
+                    acct["period_uses"] += 1
+                    charged = "allowance"
+                elif acct["credits"] > 0:
+                    acct["credits"] -= 1
+                    charged = "credit"
+                else:
+                    return [{"allowed": False, "reason": "plan_limit", "charged": None, "plan": acct["plan"],
+                             "used": acct["period_uses"], "allowance": limit, "credits": 0}]
+                return [{"allowed": True, "reason": None, "charged": charged, "plan": acct["plan"],
+                         "used": acct["period_uses"], "allowance": limit, "credits": acct["credits"]}]
+            uses = self.webchat_visitors.get(p["p_visitor_id"], 0)
+            ip_uses = self.webchat_ip.get(p["p_ip_hash"], 0)
+            if uses >= p["p_visitor_limit"] or ip_uses >= p["p_ip_daily_limit"]:
+                return [{"allowed": False, "reason": "signup_required", "charged": None, "plan": None,
+                         "used": uses, "allowance": p["p_visitor_limit"], "credits": 0}]
+            self.webchat_visitors[p["p_visitor_id"]] = uses + 1
+            self.webchat_ip[p["p_ip_hash"]] = ip_uses + 1
+            return [{"allowed": True, "reason": None, "charged": "trial", "plan": None,
+                     "used": uses + 1, "allowance": p["p_visitor_limit"], "credits": 0}]
+        if fn == "webchat_refund":
+            if p["p_charged"] == "trial":
+                self.webchat_visitors[p["p_visitor_id"]] -= 1
+                self.webchat_ip[p["p_ip_hash"]] -= 1
+            elif p["p_charged"] == "allowance":
+                acct["period_uses"] -= 1
+            elif p["p_charged"] == "credit":
+                acct["credits"] += 1
+            return None
+        if fn == "webchat_apply_grant":
+            new = p["p_grant_id"] not in self.webchat_grants
+            if new:
+                self.webchat_grants.add(p["p_grant_id"])
+                acct["plan"] = p["p_plan"] or acct["plan"]
+                acct["credits"] += p["p_add_credits"] or 0
+            return [{"applied": new, "plan": acct["plan"], "credits": acct["credits"]}]
         raise AssertionError(f"unexpected rpc {fn}")
 
 
@@ -309,6 +382,8 @@ def env(monkeypatch):
         return True
 
     monkeypatch.setattr(notifier, "notify_tier2", fake_notify)
+    # The retry loop normally leaves just-updated threads alone for 2 minutes.
+    monkeypatch.setattr(conversation, "RETRY_GRACE_SECONDS", 0)
 
     n8n = FakeN8n()
     monkeypatch.setattr(notifier, "_http", httpx.AsyncClient(transport=httpx.MockTransport(n8n.handler)))

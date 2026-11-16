@@ -42,6 +42,8 @@ def eq(value: Any) -> str:
 async def rpc(function: str, params: dict[str, Any]) -> Any:
     resp = await get_client().post(f"/rpc/{function}", json=params, headers=_headers())
     resp.raise_for_status()
+    if resp.status_code == 204 or not resp.content:
+        return None  # PostgREST answers 204 with no body for functions returning void
     return resp.json()
 
 
@@ -77,10 +79,13 @@ async def upsert(table: str, row: dict[str, Any] | list[dict[str, Any]], on_conf
     resp.raise_for_status()
 
 
-async def select(table: str, filters: dict[str, str], columns: str = "*", limit: int | None = None) -> list[dict]:
+async def select(table: str, filters: dict[str, str], columns: str = "*", limit: int | None = None,
+                 offset: int | None = None) -> list[dict]:
     params = {"select": columns, **filters}
     if limit is not None:
         params["limit"] = str(limit)
+    if offset:
+        params["offset"] = str(offset)
     resp = await get_client().get(f"/{table}", params=params, headers=_headers())
     resp.raise_for_status()
     return resp.json()

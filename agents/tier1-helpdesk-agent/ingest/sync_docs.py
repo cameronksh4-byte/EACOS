@@ -31,13 +31,14 @@ __all__ = ["Chunk", "DocMeta", "chunk_document", "load_chunks", "parse_document"
 
 VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
 EMBED_BATCH = 64
+PAGE_SIZE = 500
 
 _FRONT_MATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
 def parse_document(path: Path) -> tuple[DocMeta, str]:
     """Return (metadata, body) for one SOP file."""
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8-sig")  # tolerate a UTF-8 BOM (Windows editors add one)
     fields: dict[str, str] = {}
     match = _FRONT_MATTER.match(text)
     if match:
@@ -127,16 +128,32 @@ def main(argv: list[str] | None = None) -> int:
     headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
     with httpx.Client(timeout=30.0) as client:
-        resp = client.get(
-            f"{rest}/sop_chunks",
-            headers=headers,
-            params={"select": "id,content_hash", "tenant_id": f"eq.{args.tenant}"},
-        )
-        resp.raise_for_status()
-        existing = {row["id"]: row["content_hash"] for row in resp.json()}
+        # Page through every existing chunk: Supabase caps one response (1000 rows
+        # by default), and a partial list would re-embed and mis-prune.
+        existing: dict[str, str] = {}
+        ingested: set[str] = set()
+        offset = 0
+        while True:
+            resp = client.get(
+                f"{rest}/sop_chunks",
+                headers=headers,
+                params={"select": "id,content_hash,source", "tenant_id": f"eq.{args.tenant}",
+                        "order": "id.asc", "limit": str(PAGE_SIZE), "offset": str(offset)},
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            for row in page:
+                existing[row["id"]] = row["content_hash"]
+                if (row.get("source") or "ingest") == "ingest":
+                    ingested.add(row["id"])
+            if len(page) < PAGE_SIZE:
+                break
+            offset += PAGE_SIZE
 
         changed = [c for c in chunks if existing.get(c.row_id(args.tenant)) != c.content_hash]
-        stale = sorted(set(existing) - {c.row_id(args.tenant) for c in chunks})
+        # Only chunks this tool ingested are ever pruned. SOPs approved through the
+        # knowledge flywheel (source = flywheel) have no local file and must survive.
+        stale = sorted(ingested - {c.row_id(args.tenant) for c in chunks})
         print(f"{len(changed)} new/changed, {len(chunks) - len(changed)} unchanged, {len(stale)} stale")
 
         if args.dry_run:
@@ -180,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
                 resp = client.delete(
                     f"{rest}/sop_chunks",
                     headers=headers,
-                    params={"tenant_id": f"eq.{args.tenant}", "id": f"in.({ids})"},
+                    params={"tenant_id": f"eq.{args.tenant}", "source": "eq.ingest", "id": f"in.({ids})"},
                 )
                 resp.raise_for_status()
             print(f"deleted {len(stale)} stale chunks")

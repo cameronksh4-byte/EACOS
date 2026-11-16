@@ -13,6 +13,7 @@ validated again with Pydantic.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -27,6 +28,11 @@ from app.services import supabase_client
 logger = logging.getLogger(__name__)
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# With server-side fallbacks one request can be sampled by several models
+# (each declined hop is billed), so the reservation covers this many attempts.
+FALLBACK_MAX_HOPS = 3
+SETTLE_ATTEMPTS = 3
+SETTLE_RETRY_DELAY_SECONDS = 0.5
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -102,9 +108,31 @@ async def aclose() -> None:
 # ---------------------------------------------------------------------------
 
 
-def cost_from_usage(model: str, usage: Any) -> float:
-    """Real cost of one response (thinking tokens bill as output)."""
+def cost_from_usage(model: str, usage: Any, requested_model: str | None = None) -> float:
+    """Real cost of one response (thinking tokens bill as output).
+
+    When a server-side fallback served the response, `usage.iterations` lists
+    every attempt: declined hops (`message`, billed at the requested model's
+    price) and the serving hop (`fallback_message`, which names its model).
+    All of them are billed, so all of them are summed.
+    """
+    iterations = getattr(usage, "iterations", None) or []
+    if any(_field(it, "type") == "fallback_message" for it in iterations):
+        total = 0.0
+        for it in iterations:
+            if _field(it, "type") in ("message", "fallback_message"):
+                total += _token_cost(_field(it, "model") or requested_model or model, it)
+        return total
+    return _token_cost(model, usage)
+
+
+def _field(obj: Any, name: str) -> Any:
+    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+
+def _token_cost(model: str, usage: Any) -> float:
     in_price, out_price = get_settings().price_for(model)
+    usage = _Usage(usage) if isinstance(usage, dict) else usage
     uncached = getattr(usage, "input_tokens", 0) or 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
@@ -113,10 +141,23 @@ def cost_from_usage(model: str, usage: Any) -> float:
     return (input_cost + output * out_price) / 1_000_000
 
 
-def worst_case_cost(model: str, max_tokens: int, system: str, content: list[dict[str, Any]]) -> float:
-    """Upper bound used for the reservation: rough input tokens + full max_tokens."""
+class _Usage:
+    """Attribute access over a dict-shaped usage entry."""
+
+    def __init__(self, data: dict[str, Any]):
+        self.__dict__.update(data)
+
+
+def worst_case_cost(model: str, max_tokens: int, system: str, content: list[dict[str, Any]],
+                    *, fallbacks: bool = False) -> float:
+    """Upper bound used for the reservation: rough input tokens + full max_tokens.
+
+    With fallbacks on, every hop may be billed and the serving model is not
+    known in advance: reserve FALLBACK_MAX_HOPS attempts at the highest known price.
+    """
     settings = get_settings()
-    in_price, out_price = settings.price_for(model)
+    in_price, out_price = settings.highest_price() if fallbacks else settings.price_for(model)
+    hops = FALLBACK_MAX_HOPS if fallbacks else 1
     chars = len(system)
     images = 0
     for block in content:
@@ -126,7 +167,7 @@ def worst_case_cost(model: str, max_tokens: int, system: str, content: list[dict
             images += 1
     # ~3 chars/token is conservative for English. Cache writes bill at 1.25x.
     input_tokens = chars / 3 + images * settings.reserve_tokens_per_image + 200
-    return round((input_tokens * in_price * 1.25 + max_tokens * out_price) / 1_000_000, 6)
+    return round(hops * (input_tokens * in_price * 1.25 + max_tokens * out_price) / 1_000_000, 6)
 
 
 # ---------------------------------------------------------------------------
@@ -157,22 +198,32 @@ async def reserve(tenant_id: str, ticket_id: str, purpose: str, estimated_usd: f
 
 
 async def settle(tenant_id: str, reservation_id: str, model: str, usage: Any, cost: float) -> None:
-    try:
-        await supabase_client.rpc(
-            "settle_llm_budget",
-            {
-                "p_tenant_id": tenant_id,
-                "p_reservation_id": reservation_id,
-                "p_model": model,
-                "p_cost_usd": round(cost, 6),
-                "p_input_tokens": getattr(usage, "input_tokens", 0) or 0,
-                "p_output_tokens": getattr(usage, "output_tokens", 0) or 0,
-                "p_cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
-                "p_cache_write_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
-            },
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("failed to settle llm reservation id=%s tenant=%s", reservation_id, tenant_id)
+    """Replace the reservation with the real cost.
+
+    Retried, because an unsettled reservation is all the ledger knows about the
+    call. If every attempt fails the row stays 'reserved' at its worst-case
+    estimate, which the ledger keeps counting (over-, never under-counting).
+    """
+    params = {
+        "p_tenant_id": tenant_id,
+        "p_reservation_id": reservation_id,
+        "p_model": model,
+        "p_cost_usd": round(cost, 6),
+        "p_input_tokens": getattr(usage, "input_tokens", 0) or 0,
+        "p_output_tokens": getattr(usage, "output_tokens", 0) or 0,
+        "p_cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+        "p_cache_write_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+    }
+    for attempt in range(1, SETTLE_ATTEMPTS + 1):
+        try:
+            await supabase_client.rpc("settle_llm_budget", params)
+            return
+        except Exception as exc:  # noqa: BLE001
+            if attempt == SETTLE_ATTEMPTS:
+                logger.exception("failed to settle llm reservation id=%s tenant=%s", reservation_id, tenant_id)
+                return
+            logger.warning("settle attempt %d failed id=%s err=%s", attempt, reservation_id, type(exc).__name__)
+            await asyncio.sleep(SETTLE_RETRY_DELAY_SECONDS * attempt)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +257,12 @@ async def structured_call(
 ) -> StructuredResult[T]:
     """Budget-gated, schema-constrained call. Raises Budget*Error before calling."""
     settings = get_settings()
-    reservation_id = await reserve(tenant_id, ticket_id, purpose, worst_case_cost(model, max_tokens, system, content))
+    # Server-side refusal fallbacks exist on the Claude API only.
+    use_fallbacks = (allow_fallbacks and settings.enable_refusal_fallbacks
+                     and settings.llm_provider is LLMProvider.ANTHROPIC)
+    reservation_id = await reserve(
+        tenant_id, ticket_id, purpose,
+        worst_case_cost(model, max_tokens, system, content, fallbacks=use_fallbacks))
 
     request: dict[str, Any] = {
         "model": settings.provider_model_id(model),
@@ -220,8 +276,7 @@ async def structured_call(
     usage: Any = None
     try:
         client = get_client()
-        # Server-side refusal fallbacks exist on the Claude API only.
-        if allow_fallbacks and settings.enable_refusal_fallbacks and settings.llm_provider is LLMProvider.ANTHROPIC:
+        if use_fallbacks:
             response = await client.beta.messages.create(**request, betas=[FALLBACK_BETA], fallbacks="default")
         else:
             response = await client.messages.create(**request)
@@ -236,7 +291,7 @@ async def structured_call(
         result.model = (response.model or model).removeprefix(settings.bedrock_model_prefix)
         _read_response(response, output_model, result, purpose, max_tokens, preprocess)
     finally:
-        result.cost_usd = cost_from_usage(result.model, usage) if usage is not None else 0.0
+        result.cost_usd = cost_from_usage(result.model, usage, model) if usage is not None else 0.0
         await settle(tenant_id, reservation_id, result.model, usage, result.cost_usd)
         outcome = "refused" if result.refused else (result.error or "ok")
         ledger.calls.append(CallRecord(purpose, result.model, result.cost_usd, outcome))

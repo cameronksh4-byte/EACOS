@@ -106,9 +106,14 @@ async def _sop_exists(tenant_id: str, doc_id: str) -> bool:
 
 
 async def plan_request(
-    payload: IncomingTicketWebhook, requested_item: str, user: UserContext | None, justification: str
+    payload: IncomingTicketWebhook, requested_item: str, user: UserContext | None, justification: str,
+    *, allow_auto_provision: bool = True,
 ) -> ApprovalPlan:
-    """Decide and (where needed) start the approval for a requested item. Never raises."""
+    """Decide and (where needed) start the approval for a requested item. Never raises.
+
+    allow_auto_provision=False (the model wasn't confident about the request)
+    means nothing is provisioned without a human: no-approval items escalate.
+    """
     settings = get_settings()
     try:
         item = match_catalog(requested_item, await load_catalog(payload.tenant_id))
@@ -119,6 +124,9 @@ async def plan_request(
             if not item.doc_id or not await _sop_exists(payload.tenant_id, item.doc_id):
                 return ApprovalPlan(TriageAction.ESCALATE_TIER_2, item,
                                     note=f"{item.item_key}: no approval needed, but no SOP on record to cite")
+            if not allow_auto_provision:
+                return ApprovalPlan(TriageAction.ESCALATE_TIER_2, item,
+                                    note=f"{item.item_key}: not auto-provisioned (confidence below threshold)")
             dispatched = await dispatch_provisioning(payload.tenant_id, item, payload.reporter_email,
                                                      payload.ticket_id, approval_id=None)
             if not dispatched:

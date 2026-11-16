@@ -47,7 +47,7 @@ def _blank_none(value: str | None) -> str | None:
 
 def parse_catalog(path: Path, tenant: str) -> list[dict[str, Any]]:
     rows = []
-    with path.open(newline="", encoding="utf-8") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         for lineno, raw in enumerate(csv.DictReader(f), start=2):
             try:
                 item = CatalogItem(
@@ -73,7 +73,7 @@ def parse_catalog(path: Path, tenant: str) -> list[dict[str, Any]]:
 
 def parse_directory(path: Path, tenant: str) -> list[dict[str, Any]]:
     rows = []
-    with path.open(newline="", encoding="utf-8") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         for lineno, raw in enumerate(csv.DictReader(f), start=2):
             try:
                 devices = []

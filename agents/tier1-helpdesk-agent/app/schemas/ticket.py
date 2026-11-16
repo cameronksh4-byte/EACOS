@@ -113,7 +113,7 @@ class IncomingTicketWebhook(_Strict):
     reporter_email: str = Field(..., max_length=320)
     subject: str = Field(..., max_length=1000)
     body: str = Field(..., max_length=50_000)
-    source_system: str = Field(default="slack", pattern="^(slack|teams|jira|zendesk|n8n|api)$")
+    source_system: str = Field(default="slack", pattern="^(slack|teams|jira|zendesk|n8n|api|web)$")
     attachment_urls: List[HttpUrl] = Field(default_factory=list, max_length=10)
 
     @field_validator("reporter_email")
@@ -418,7 +418,7 @@ class AgentTriageResult(_Strict):
 
 class CatalogItem(_Strict):
     tenant_id: str
-    item_key: str
+    item_key: str = Field(..., pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")  # same rule as the table CHECK
     item_type: CatalogItemType
     display_name: str
     aliases: List[str] = Field(default_factory=list)
@@ -620,3 +620,78 @@ class FlywheelOutcome(_Strict):
     draft_id: Optional[UUID] = None
     doc_id: Optional[str] = None
     reason: str
+
+
+# =============================================================================
+# Public website chat (free trial, plans, credits)
+# =============================================================================
+
+_EMAIL_RE = r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+
+
+class WebChatRequest(_Strict):
+    """One question from the company website, sent (signed) by the website's server."""
+
+    visitor_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{16,64}$", description="Opaque ID from a server-set cookie")
+    client_ip: str = Field(..., max_length=64, description="The visitor's address as seen by the website's server")
+    account_email: Optional[str] = Field(
+        None, max_length=320, pattern=_EMAIL_RE, description="Set only once the website has verified the address"
+    )
+    message: str = Field(..., min_length=2, max_length=4000)
+
+    @field_validator("account_email")
+    @classmethod
+    def _lower(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip().lower() if value else None
+
+
+class WebChatResponse(_Strict):
+    status: Literal["answered", "signup_required", "limit_reached", "unavailable"]
+    outcome: Optional[Literal["resolved", "escalated", "declined"]] = None
+    reply: str = Field(..., description="Plain text. Render it as text, never as HTML.")
+    cited_sop_ids: List[str] = Field(default_factory=list)
+    signed_in: bool = False
+    plan: Optional[str] = None
+    used: int = 0
+    allowance: int = 0
+    remaining: int = 0
+    credits: int = 0
+    signup_url: Optional[str] = None
+    upgrade_url: Optional[str] = None
+
+
+class WebChatGrant(_Strict):
+    """A plan change and/or credit purchase, applied once per grant_id (the payment's own ID)."""
+
+    grant_id: str = Field(..., min_length=8, max_length=200)
+    email: str = Field(..., max_length=320, pattern=_EMAIL_RE)
+    plan: Optional[str] = Field(None, pattern=r"^[a-z0-9_]{1,32}$")
+    add_credits: int = Field(0, ge=0, le=100_000)
+
+    @field_validator("email")
+    @classmethod
+    def _lower(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @model_validator(mode="after")
+    def _does_something(self) -> "WebChatGrant":
+        if self.plan is None and self.add_credits == 0:
+            raise ValueError("a grant must set a plan, add credits, or both")
+        return self
+
+
+class WebChatAccountQuery(_Strict):
+    email: str = Field(..., max_length=320, pattern=_EMAIL_RE)
+
+    @field_validator("email")
+    @classmethod
+    def _lower(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class WebChatAccount(_Strict):
+    email: str
+    plan: str
+    used: int
+    allowance: int
+    credits: int
