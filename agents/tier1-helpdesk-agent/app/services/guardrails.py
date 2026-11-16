@@ -27,6 +27,7 @@ from app.schemas.ticket import (
     SeverityLevel,
     TicketCategory,
     TriageAction,
+    is_escalate_only,
 )
 
 TRIAGE_UNAVAILABLE = "triage_unavailable"  # marks results produced without a model answer
@@ -126,6 +127,15 @@ def clarification_message(question: str) -> str:
     return f"Thanks for the details! So I can point you to the right fix, one quick question:\n\n{question}"
 
 
+def handoff_question_message(settings: Settings, ticket_id: str, question: str) -> str:
+    """Escalate-only case: a person is already on it; the question completes their handoff packet."""
+    return (
+        f"Thanks for the details! This one needs {settings.tier2_contact_hint}, so I've passed it on and "
+        f"they'll follow up with you (reference {ticket_id}).\n\n"
+        f"So they have everything they need, one quick question:\n\n{question}"
+    )
+
+
 def _notes(*parts: str | None) -> str | None:
     text = "\n".join(p.strip() for p in parts if p and p.strip())
     return text or None
@@ -186,6 +196,7 @@ def enforce_policy(
     cited = [sid for sid in dict.fromkeys(draft.cited_sop_ids) if sid in retrieved_sop_ids]
     dropped = sorted(set(draft.cited_sop_ids) - set(cited))
     is_security = draft.category is TicketCategory.SECURITY_INCIDENT
+    escalate_only = any(is_escalate_only(sid) for sid in cited)
     severity = draft.severity
     if is_security and severity in (SeverityLevel.LOW, SeverityLevel.MEDIUM):
         severity = SeverityLevel.HIGH
@@ -234,6 +245,8 @@ def enforce_policy(
         reply = clarification_message(result.clarifying_question or "")
         if is_security:
             reply = security_message(settings, payload.ticket_id) + "\n\n" + (result.clarifying_question or "")
+        elif escalate_only:
+            reply = handoff_question_message(settings, payload.ticket_id, result.clarifying_question or "")
     elif result.action is TriageAction.AWAIT_MANAGER_APPROVAL:
         reply = approval_pending_message(settings, payload.ticket_id, approval_item_name or draft.requested_item or "This item")
     elif is_security:
@@ -241,6 +254,10 @@ def enforce_policy(
         reply = draft.draft_user_reply if grounded else security_message(settings, payload.ticket_id)
         if not grounded:
             notes.append(f"Unsent AI draft:\n{draft.draft_user_reply}")
+    elif escalate_only and grounded and draft.draft_user_reply.strip():
+        # A must-escalate SOP: its safe first aid reaches the user with the handoff.
+        reply = (f"{draft.draft_user_reply.rstrip()}\n\n"
+                 f"I've passed this to {settings.tier2_contact_hint}. Your reference number is {payload.ticket_id}.")
     else:
         reply = handoff_message(settings, payload.ticket_id)
         notes.append(f"Unsent AI draft:\n{draft.draft_user_reply}")

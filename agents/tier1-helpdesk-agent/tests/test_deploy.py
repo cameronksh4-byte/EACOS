@@ -155,7 +155,8 @@ def test_every_validated_setting_reaches_the_container():
     """--check validates with the app's Settings, so whatever it accepts must be forwarded."""
     cfg = {**TIER0, "CONFIDENCE_THRESHOLD": "0.9", "TRIAGE_MAX_TOKENS": "2048", "OUTAGE_MIN_DISTINCT_REPORTERS": "4",
            "WEBCHAT_ENABLED": "true", "WEBCHAT_SIGNING_SECRET": "w" * 40, "WEBCHAT_SOP_DIR": "ingest/sample_sops",
-           "WEBCHAT_PLAN_MONTHLY_LIMITS": '{"free": 20, "starter": 250}'}
+           "WEBCHAT_PLAN_MONTHLY_LIMITS": '{"free": 20, "starter": 250}',
+           "SHARED_KB_DIR": "knowledge_base/sops", "SHARED_KB_TENANT_ID": "baseline-kb"}
     assert render_config.validate(cfg) == []
     out = render_config.render(cfg, "abc123")
     env, secrets_ = out["extra_environment"], out["integration_secrets"]
@@ -166,6 +167,8 @@ def test_every_validated_setting_reaches_the_container():
     # so such settings ride in Secrets Manager instead of being dropped.
     assert secrets_["TRIAGE_MAX_TOKENS"] == "2048" and "TRIAGE_MAX_TOKENS" not in env
     assert "WEBCHAT_SOP_DIR" not in env and "WEBCHAT_SOP_DIR" not in secrets_  # deploy-script only
+    assert "SHARED_KB_DIR" not in env and "SHARED_KB_DIR" not in secrets_
+    assert env["SHARED_KB_TENANT_ID"] == "baseline-kb"  # the app searches the tenant the deploy loaded
     for name in env:
         assert not render_config.SECRET_NAME.search(name), name
 
@@ -536,6 +539,16 @@ def test_sync_sops_mode_needs_no_aws_and_says_when_there_is_nothing_to_load(stub
     proc, calls, _ = stubbed({**TIER0, "SOP_DIR": ""}, "--sync-sops", "--prune")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "nothing to load" in proc.stdout and calls == []
+
+
+def test_deploy_loads_the_shared_knowledge_base_into_its_own_tenant():
+    script = (ROOT / "deploy" / "deploy.sh").read_text()
+    sync = script.split("sync_sops() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'kb_dir="$(cfg SHARED_KB_DIR)"' in sync and "${kb_tenant:-shared-kb}" in sync
+    assert "ingest.build_shared_kb --check" in sync  # never loads a stale copy of the source page
+    example = (ROOT / "deploy" / "deploy.env.example").read_text()
+    assert "\nSHARED_KB_DIR=knowledge_base/sops\n" in example and "\nSHARED_KB_TENANT_ID=shared-kb\n" in example
+    assert render_config.validate({**TIER0, "SHARED_KB_TENANT_ID": "acme-corp", "ALLOWED_TENANT_IDS": "acme-corp"})
 
 
 def test_smoke_test_expectations_follow_disabled_features_and_webchat():

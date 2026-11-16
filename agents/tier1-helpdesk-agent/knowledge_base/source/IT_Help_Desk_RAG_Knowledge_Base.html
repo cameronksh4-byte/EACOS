@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<link rel="icon" href="data:," />
+<title>IT Help Desk RAG Knowledge Base</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f4f6f5; --surface:#ffffff; --surface2:#edf1ef; --ink:#17201e; --muted:#5a6b67; --line:#d7dedb;
+  --teal:#0f766e; --teal-dark:#0b5953; --teal-soft:#e0f2ef;
+  --red:#b42318; --red-soft:#fdf0ee; --amber:#9a6700; --amber-soft:#fdf3d7;
+  --green:#067647; --green-soft:#e6f4ea;
+  --radius:14px;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0f1514; --surface:#18201e; --surface2:#212b29; --ink:#e8efed; --muted:#9db0ab; --line:#2e3d3a;
+  --teal:#2dd4bf; --teal-dark:#5eead4; --teal-soft:#12332f;
+  --red:#f97066; --red-soft:#3a1e1c; --amber:#fdb022; --amber-soft:#332a12;
+  --green:#32d583; --green-soft:#143324; }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;line-height:1.55;font-size:16px}
+h1,h2,h3{font-family:"Archivo",sans-serif;line-height:1.15;margin:0}
+a{color:var(--teal-dark)}
+button,[role="button"],select,summary,input:not([type="checkbox"]){min-height:38px}
+.wrap{max-width:1120px;margin:0 auto;padding:0 18px 64px}
+.mono{font-family:"IBM Plex Mono",monospace;font-size:.86em}
+
+/* intro */
+.intro{padding:28px 0 8px}
+.intro h1{font-size:clamp(28px,5vw,44px);letter-spacing:-.02em;max-width:18ch}
+.intro p.lede{font-size:17px;color:var(--muted);max-width:68ch;margin:12px 0 0}
+.meta-line{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.pill{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:6px 12px;font-size:13px;font-weight:600}
+.pill.red{border-color:var(--red);color:var(--red);background:var(--red-soft)}
+
+/* stats */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0}
+@media(max-width:700px){.stats{grid-template-columns:1fr 1fr}}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+.stat b{font-family:"Archivo";font-size:30px;display:block;line-height:1}
+.stat span{font-size:13px;color:var(--muted);font-weight:600}
+
+/* guardrails */
+.guard{background:var(--ink);color:var(--bg);border-radius:16px;padding:20px;margin:6px 0 28px}
+@media(prefers-color-scheme:dark){.guard{background:#e8efed;color:#17201e}}
+.guard h2{font-size:19px;margin-bottom:6px}
+.guard p{margin:0 0 12px;opacity:.85;font-size:14.5px;max-width:70ch}
+.guard ul{display:grid;grid-template-columns:1fr 1fr;gap:8px 20px;margin:0;padding:0;list-style:none;font-size:14.5px;font-weight:600}
+@media(max-width:600px){.guard ul{grid-template-columns:1fr}}
+.guard li::before{content:"✕  ";color:var(--red);font-weight:800}
+@media(prefers-color-scheme:dark){.guard li::before{color:#b42318}}
+
+/* sections */
+section{margin:36px 0}
+.sec-head{margin-bottom:14px}
+.sec-head h2{font-size:clamp(22px,3.4vw,30px);letter-spacing:-.01em}
+.sec-head p{color:var(--muted);margin:6px 0 0;max-width:72ch}
+
+/* search / filters */
+.toolbar{position:sticky;top:0;z-index:20;background:var(--bg);padding:12px 0 10px;border-bottom:1px solid var(--line)}
+.toolbar input[type="search"]{width:100%;padding:11px 14px;border-radius:10px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-size:16px;font-family:inherit}
+.toolbar input:focus{outline:2px solid var(--teal);border-color:transparent}
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+.chip{border:1.5px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:7px 13px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit;min-height:38px}
+.chip[aria-pressed="true"]{background:var(--teal);border-color:var(--teal);color:#fff}
+@media(prefers-color-scheme:dark){.chip[aria-pressed="true"]{color:#06201c}}
+.chip.red[aria-pressed="true"]{background:var(--red);border-color:var(--red);color:#fff}
+.count-line{font-size:13.5px;color:var(--muted);margin:10px 0 0;font-weight:600}
+
+/* case cards */
+.cases{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+@media(max-width:760px){.cases{grid-template-columns:1fr}}
+.case{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column}
+.case-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.case h3{font-size:16.5px}
+.cat{font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--teal-dark);white-space:nowrap}
+.verdict{font-size:12px;font-weight:700;border-radius:999px;padding:4px 9px;white-space:nowrap}
+.verdict.guide{background:var(--green-soft);color:var(--green)}
+.verdict.mixed{background:var(--amber-soft);color:var(--amber)}
+.verdict.esc{background:var(--red-soft);color:var(--red)}
+.symptom{font-size:14px;color:var(--muted);font-style:italic;margin:8px 0 0}
+.case details{margin-top:10px;border-top:1px dashed var(--line);padding-top:10px}
+.case summary{cursor:pointer;font-weight:700;font-size:14px;color:var(--teal-dark);list-style:none;padding:4px 0}
+.case summary::-webkit-details-marker{display:none}
+.case summary::after{content:" +";font-weight:700}
+.case details[open ] summary::after{content:" −"}
+.case ol,.case ul{margin:6px 0 10px;padding-left:20px;font-size:14.5px}
+.case li{margin:3px 0}
+.label{font-size:11.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-top:10px}
+.esc-box{background:var(--red-soft);border-radius:10px;padding:10px 12px;font-size:14px;margin-top:6px}
+.esc-box b{color:var(--red)}
+
+/* escalate grid */
+.esc-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:760px){.esc-grid{grid-template-columns:1fr}}
+.esc-card{background:var(--surface);border:1px solid var(--line);border-left:5px solid var(--red);border-radius:12px;padding:15px}
+.esc-card h3{font-size:16px;display:flex;gap:8px}
+.esc-card h3 .num{background:var(--red);color:#fff;width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:13px;flex:none;font-family:"IBM Plex Sans"}
+.esc-card p{font-size:14px;margin:7px 0 0}
+.esc-card p b{color:var(--red)}
+.esc-card .aid{font-size:13.5px;background:var(--surface2);border-radius:8px;padding:8px 10px;margin-top:9px}
+
+/* tables -> stacked on mobile */
+.tbl-wrap{overflow:visible}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14px}
+th{text-align:left;background:var(--surface2);padding:11px 12px;font-size:12.5px;letter-spacing:.04em;text-transform:uppercase}
+td{padding:11px 12px;border-top:1px solid var(--line);vertical-align:top}
+td:first-child{font-weight:700}
+@media(max-width:760px){
+  table,thead,tbody,tr,td{display:block;width:100%}
+  thead{display:none}
+  tr{border-top:1px solid var(--line);padding:8px 0}
+  tr:first-child{border-top:none}
+  td{border-top:none;padding:5px 12px}
+  td::before{content:attr(data-l);display:block;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+}
+.badge{display:inline-block;font-size:11.5px;font-weight:700;border-radius:999px;padding:3px 8px;background:var(--teal-soft);color:var(--teal-dark)}
+.badge.warn{background:var(--red-soft);color:var(--red)}
+.badge.amber{background:var(--amber-soft);color:var(--amber)}
+.small{font-size:13px;color:var(--muted)}
+
+/* two col */
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:700px){.two{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+.panel h3{font-size:17px;margin-bottom:8px}
+.panel ul{margin:0;padding-left:20px;font-size:14.5px}
+.panel li{margin:6px 0}
+.panel.do h3{color:var(--green)} .panel.dont h3{color:var(--red)}
+
+/* handoff */
+.handoff{background:var(--surface);border:1.5px dashed var(--teal);border-radius:var(--radius);padding:18px}
+.handoff pre{white-space:pre-wrap;font-family:"IBM Plex Mono",monospace;font-size:13.5px;background:var(--surface2);border-radius:10px;padding:14px;margin:12px 0;overflow-wrap:anywhere}
+.btn{background:var(--teal);color:#fff;border:none;border-radius:10px;padding:11px 18px;font-weight:700;font-size:15px;cursor:pointer;font-family:inherit;min-height:44px}
+@media(prefers-color-scheme:dark){.btn{color:#06201c}}
+.btn:active{transform:scale(.98)}
+.btn-ghost{background:var(--surface);color:var(--teal-dark);border:1.5px solid var(--teal)}
+.copy-msg{font-size:13.5px;font-weight:600;color:var(--green);margin-left:10px}
+
+/* callouts */
+.callout{border-radius:12px;padding:16px 18px;font-size:14.5px;margin:12px 0}
+.callout.red{background:var(--red-soft);border:1px solid var(--red)}
+.callout.amber{background:var(--amber-soft);border:1px solid var(--amber)}
+.callout h3{font-size:16px;margin-bottom:5px}
+.callout p{margin:4px 0}
+.openq{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+.openq ol{margin:8px 0 0;padding-left:22px;font-size:14.5px}
+.openq li{margin:7px 0}
+footer{border-top:1px solid var(--line);margin-top:44px;padding-top:18px;font-size:13px;color:var(--muted)}
+footer a{word-break:break-all}
+.src-list{columns:2;column-gap:28px;padding-left:18px}
+@media(max-width:700px){.src-list{columns:1}}
+.src-list li{margin:4px 0;break-inside:avoid}
+.nav-jump{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}
+.nav-jump a{border:1.5px solid var(--line);background:var(--surface);border-radius:999px;padding:8px 13px;font-size:13.5px;font-weight:600;text-decoration:none;color:var(--ink);display:inline-flex;align-items:center;min-height:38px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="intro">
+  <h1>The Tier 1 knowledge base your help desk agent retrieves from</h1>
+  <p class="lede">Every common small-business IT case — in the user's own words, with the fix in order, what to check when step 1 fails, and the exact point it stops being a chat fix and becomes a human's job. Built for RGV clinics, contractors, logistics, and professional services, in English and Spanish. Research date: 13 November 2026.</p>
+  <div class="meta-line">
+    <span class="pill">Password / account lockouts are the #1 ticket — 20–50% of help desk calls (Gartner estimate, via Suptask runbook)</span>
+    <span class="pill red">Apple Support Communities closes 20 Nov 2026 — do not build on it</span>
+  </div>
+  <nav class="nav-jump" aria-label="Sections">
+    <a href="#cases">Case library</a><a href="#escalate">Must escalate</a><a href="#forums">Forums</a><a href="#research-rules">Research rules</a><a href="#handoff">Handoff packet</a><a href="#gather">What to gather per client</a><a href="#open">Open questions</a>
+  </nav>
+</header>
+
+<div class="stats">
+  <div class="stat"><b>30</b><span>guided cases across 12 categories</span></div>
+  <div class="stat"><b>15</b><span>situations that must go to a human</span></div>
+  <div class="stat"><b>15</b><span>forums &amp; vendor sources mapped</span></div>
+  <div class="stat"><b>$0</b><span>paid information sources needed — all research sources here are free to read</span></div>
+</div>
+
+<div class="guard" role="note">
+  <h2>Hard guardrails — encoded in every answer</h2>
+  <p>The agent guides by chat only. The user does the clicking; the agent changes nothing on any system. Where a fix requires one of these, the step is not a step — it's an escalation, after a human verifies identity.</p>
+  <ul>
+    <li>Never collect a password — current, new, temporary, or an MFA code</li>
+    <li>Never make admin or permission changes</li>
+    <li>Never start remote access on its own</li>
+    <li>Never delete data</li>
+    <li>Never guess — an unmatched error means escalate</li>
+    <li>Never ask for, paste, or store PHI in chat</li>
+  </ul>
+</div>
+
+<section id="cases">
+  <div class="sec-head">
+    <h2>Case library — what to put in the RAG</h2>
+    <p>Two questions come first in <em>every</em> case: <strong>“One user, or everyone?”</strong> and <strong>“When did it start — what changed?”</strong> Scope decides everything. Offer steps in the user's language, but quote on-screen error text in English exactly as shown — never translate error codes. Sources: Suptask runbook, InvGate common tickets, Microsoft Support (Outlook), Premier Technologies, Hogan.</p>
+  </div>
+  <div class="toolbar">
+    <input type="search" id="q" placeholder="Search cases — try “printer”, “locked out”, “ransomware”, “monitor”…" aria-label="Search cases">
+    <div class="chips" id="catChips" role="group" aria-label="Filter by category"></div>
+    <div class="chips" role="group" aria-label="Filter by handling">
+      <button class="chip" data-verdict="all" aria-pressed="true">All handling</button>
+      <button class="chip" data-verdict="guide" aria-pressed="false">AI can guide</button>
+      <button class="chip" data-verdict="mixed" aria-pressed="false">Guide, then escalate</button>
+      <button class="chip red" data-verdict="esc" aria-pressed="false">Escalate to human</button>
+    </div>
+    <p class="count-line" id="countLine"></p>
+  </div>
+  <div class="cases" id="caseGrid"></div>
+  <p class="small" id="noResults" hidden>No case matches that search. If a real user's error doesn't match a known case, that's itself an escalation — see Must-Escalate #15.</p>
+</section>
+
+<section id="onboarding">
+  <div class="sec-head"><h2>Onboarding &amp; offboarding — a request, not a fix</h2>
+  <p>The agent never creates accounts, assigns licences, sets passwords, or grants access. It collects a complete request and hands it to the human / IT owner. If the manager, role, or access list is missing, it asks and waits — it does not guess access.</p></div>
+  <div class="two">
+    <div class="panel"><h3>New starter — collect before day one</h3><ul>
+      <li>Full name (preferred display name), start date, manager, role / department</li>
+      <li>Work location: office / home / both; employment or contractor status</li>
+      <li>Systems the role needs: email, apps, shared drives, printers, phone extension, VPN</li>
+      <li>Equipment: laptop/desktop, monitor, dock, headset</li>
+      <li>Manager's approval for access — plus a “same access as [named colleague in the same role]” reference, never “give them everything”</li></ul>
+      <p class="small"><strong>Human then:</strong> creates a <em>named</em> account (never a shared login), assigns the licence, enrols MFA with the user, adds role groups/drives, sets up the phone extension, and gives a one-page welcome sheet. Every account documented — without writing down any password.</p></div>
+    <div class="panel"><h3>Leaver — collect &amp; act same day</h3><ul>
+      <li>Name, last day and timing, manager</li>
+      <li>Equipment to return</li>
+      <li>Email / file ownership to transfer, and who takes over shared mailboxes and files</li></ul>
+      <p class="small"><strong>Human then:</strong> disables the account the same day, revokes sessions, removes VPN/app access and MFA tokens, transfers ownership, recovers the licence, and verifies access is gone. Never leave a leaver's account active “just in case,” and never reuse their password or share their login with a replacement.</p>
+      <p class="small"><strong>Day-one login problems:</strong> collect which step fails, the exact error text, and whether MFA enrolment was completed. If the account doesn't exist or the licence is missing, it's an admin fix, not a user fix.</p></div>
+  </div>
+  <div class="callout amber"><h3>RGV field notes</h3>
+  <p><strong>Clinics:</strong> any case touching patient systems, the EHR, or PHI is an immediate escalation — never troubleshoot PHI access in chat.</p>
+  <p><strong>Contractors / logistics:</strong> field, mobile, shared printer/scanner, and VPN-from-a-job-site cases are common — always ask <em>where</em> the user is (office, home, job site, truck) and whether they're on Wi-Fi, mobile data, or a hotspot.</p>
+  <p><strong>Professional services:</strong> Outlook / Teams / shared-drive cases dominate — “Can a colleague in the same role open it?” is the fastest scope check.</p></div>
+</section>
+
+<section id="escalate">
+  <div class="sec-head"><h2>Cases that must go to a human IT professional</h2>
+  <p>If a case appears here, the agent does not attempt a fix. It gives only the safe first-aid listed, collects the packet, and hands off immediately — with urgency and a named human contact. That contact must be configured per client; it isn't named yet (see Open questions).</p></div>
+  <div class="esc-grid" id="escGrid"></div>
+</section>
+
+<section id="handoff">
+  <div class="sec-head"><h2>The handoff packet — every escalation, every time</h2></div>
+  <div class="handoff">
+    <pre id="packetText">User name + contact:
+Device (type / asset tag if known):
+Location (office / home / job site):
+Scope — one user, or who else is affected:
+Exact error text (in English, as shown):
+When it started / what changed:
+What the user already tried:
+Business impact / urgency:
+For security or PHI cases: what was clicked / entered / sent, and when.
+
+NEVER include: a password, an MFA code, or PHI.</pre>
+    <button class="btn" id="copyBtn" type="button">Copy handoff packet</button><span class="copy-msg" id="copyMsg" role="status"></span>
+  </div>
+</section>
+
+<section id="forums">
+  <div class="sec-head"><h2>Forums — where to find more real cases</h2>
+  <p>Priority order: <strong>1)</strong> vendor-published help for the correct current steps, <strong>2)</strong> Spiceworks and Reddit for how problems actually present in small businesses, <strong>3)</strong> Server Fault / Super User / Stack Overflow for precise, voted, dated answers, <strong>4)</strong> BleepingComputer for malware research only — never as a live incident playbook. All are free to read; accounts are for posting.</p></div>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Forum / community</th><th>Best for</th><th>Access</th><th>Watch out</th></tr></thead>
+    <tbody>
+      <tr><td data-l="Forum"><a href="https://community.spiceworks.com/t/welcome-to-spiceworks-community/5/1" target="_blank" rel="noopener">Spiceworks Community</a></td><td data-l="Best for">SMB / MSP real-world tickets: printers, network, Windows, help-desk process — “what do other small IT shops do?”</td><td data-l="Access"><span class="badge">Free to read</span> Free account to post</td><td data-l="Watch out">Peer advice — verify against vendor help</td></tr>
+      <tr><td data-l="Forum"><a href="https://www.reddit.com/r/techsupport/" target="_blank" rel="noopener">Reddit r/techsupport</a></td><td data-l="Best for">End-user wording of problems; high-volume Windows / hardware / software / network troubleshooting. Search by exact error text</td><td data-l="Access"><span class="badge">Free to read</span> Account to post/vote</td><td data-l="Watch out"><span class="badge warn">No scraping</span> Reddit prohibits unauthorised scraping &amp; commercial use — research reading only without a licence</td></tr>
+      <tr><td data-l="Forum"><a href="https://www.reddit.com/r/sysadmin/" target="_blank" rel="noopener">Reddit r/sysadmin</a></td><td data-l="Best for">The technician side: what Tier 1 actually is (unlocks, default devices, firewall/ISP outages), escalation, MSP practice</td><td data-l="Access"><span class="badge">Free to read</span> Account to post</td><td data-l="Watch out">Same Reddit licensing limit as above</td></tr>
+      <tr><td data-l="Forum"><a href="https://techcommunity.microsoft.com/?t_id=b5c41359-8188-4f94-80ef-14ad003dcec2" target="_blank" rel="noopener">Microsoft Tech Community</a></td><td data-l="Best for">Microsoft 365, Outlook, Teams, Entra ID, Windows — discussions, blogs, events; Microsoft staff participate</td><td data-l="Access"><span class="badge">Free to use</span> Sign-in to participate</td><td data-l="Watch out">—</td></tr>
+      <tr><td data-l="Forum"><a href="https://learn.microsoft.com/en-us/answers/questions/4663712/i-am-unable-to-send-and-receive-any-emails" target="_blank" rel="noopener">Microsoft Q&amp;A</a> <span class="small">(example thread)</span></td><td data-l="Best for">Authoritative Q&amp;A for Microsoft products — Microsoft support specialists answer</td><td data-l="Access"><span class="badge">Free to read</span> Microsoft account to ask</td><td data-l="Watch out">Vendor source — highest authority for Microsoft steps</td></tr>
+      <tr><td data-l="Forum"><a href="https://serverfault.com" target="_blank" rel="noopener">Server Fault</a></td><td data-l="Best for">Sysadmin / server / networking — the “why is the whole office down?” layer behind a Tier 1 ticket</td><td data-l="Access"><span class="badge">Free to read</span> Account to post</td><td data-l="Watch out"><span class="badge amber">CC BY-SA 4.0</span> Reuse needs attribution + share-alike — research reading, not RAG feedstock</td></tr>
+      <tr><td data-l="Forum"><a href="https://superuser.com" target="_blank" rel="noopener">Super User</a></td><td data-l="Best for">General computer troubleshooting for power users — Windows, macOS, networking, printers</td><td data-l="Access"><span class="badge">Free to read</span> Account to post</td><td data-l="Watch out"><span class="badge amber">CC BY-SA 4.0</span> Same as Server Fault</td></tr>
+      <tr><td data-l="Forum"><a href="https://stackoverflow.com" target="_blank" rel="noopener">Stack Overflow</a></td><td data-l="Best for">Programming / scripting only — e.g. PowerShell snippets for the builders. <strong>Not</strong> an end-user support forum</td><td data-l="Access"><span class="badge">Free to read</span> Account to post</td><td data-l="Watch out"><span class="badge amber">CC BY-SA 4.0</span> Same as above</td></tr>
+      <tr><td data-l="Forum"><a href="https://forums.tomshardware.com" target="_blank" rel="noopener">Tom's Hardware Forums</a></td><td data-l="Best for">PC hardware, builds, monitors, storage, drivers — “is this hardware dead?”</td><td data-l="Access"><span class="badge">Free to read</span> Account to post</td><td data-l="Watch out">Peer advice — verify before use</td></tr>
+      <tr><td data-l="Forum"><a href="https://www.bleepingcomputer.com/forums/f/22/virus-trojan-spyware-and-malware-removal-help/page-3?prune_day=100&sort_by=Z-A&sort_key=start_date&topicfilter=all" target="_blank" rel="noopener">BleepingComputer Forums</a></td><td data-l="Best for">Malware / ransomware research, removal guides, what infections look like</td><td data-l="Access"><span class="badge">Free to read</span> Account to post; guests can browse</td><td data-l="Watch out"><span class="badge warn">Research only</span> Only the Malware Response Team may reply to log help; average response ~5 days. A live infection is an immediate human escalation, never a forum referral</td></tr>
+      <tr><td data-l="Forum"><a href="https://support.google.com/a/threads?hl=en&thread_filter=%28pinned%3Atrue%29&sjid=16422623165124662581-NA" target="_blank" rel="noopener">Google Workspace Admin Community</a></td><td data-l="Best for">Workspace <em>admin</em> topics: Gmail routing, users/groups, Drive sharing, account suspension — research for what the admin will need to do</td><td data-l="Access"><span class="badge">Free to read</span> Google account to post</td><td data-l="Watch out">For admins, not end users — personal Gmail is redirected elsewhere. Google closed the dedicated Product Experts programme for Workspace</td></tr>
+      <tr><td data-l="Forum"><a href="https://community.freshworks.com/welcome-11306" target="_blank" rel="noopener">Freshworks Community</a></td><td data-l="Best for">Freshdesk / Freshservice <em>product</em> questions: ticket workflows, automations, portals</td><td data-l="Access"><span class="badge">Free to read</span> Account to post</td><td data-l="Watch out">Product support, not general IT cases</td></tr>
+      <tr><td data-l="Forum"><a href="https://community.zendesk.com/topic/show?tid=21280&fid=134" target="_blank" rel="noopener">Zendesk Community</a></td><td data-l="Best for">Zendesk <em>product</em> questions: Support setup, workflows, triggers / macros</td><td data-l="Access"><span class="badge">Free to view</span> Zendesk ID to post</td><td data-l="Watch out">Product support, not general IT cases</td></tr>
+      <tr><td data-l="Forum"><a href="https://discussions.apple.com/terms" target="_blank" rel="noopener">Apple Support Communities</a></td><td data-l="Best for">iPhone / iPad / Mac troubleshooting — frozen archive only</td><td data-l="Access"><span class="badge warn">Closing 20 Nov 2026</span> Read-only since 10 Nov 2026</td><td data-l="Watch out"><span class="badge warn">Do not build on it</span> Apple hasn't said threads survive closure. Use Apple Support + Reddit r/applehelp / r/techsupport instead</td></tr>
+      <tr><td data-l="Forum">Vendor help — <a href="https://support.microsoft.com/en-gb/outlook/i-can-t-send-or-receive-messages-in-outlook" target="_blank" rel="noopener">Microsoft Support</a> · <a href="https://support.google.com/a/" target="_blank" rel="noopener">Google Workspace Help</a> · <a href="https://support.apple.com" target="_blank" rel="noopener">Apple Support</a></td><td data-l="Best for">The correct, current steps for that vendor's product — use to <em>verify</em> any forum answer before the agent repeats it</td><td data-l="Access"><span class="badge">Free to read</span> No account needed</td><td data-l="Watch out">Authoritative — wins over forum advice on product behaviour</td></tr>
+    </tbody></table></div>
+  <p class="small">Note: some canonical forum homepages (Reddit subreddits, Server Fault, Super User, Stack Overflow, Tom's Hardware) were listed as plain URLs in search-result pages rather than fetched directly in this research run — verify them in the live browser before publishing them in a customer-facing list.</p>
+</section>
+
+<section id="research-rules">
+  <div class="sec-head"><h2>How to use forums as a research source — without copying</h2>
+  <p>Rule for the RAG build: every agent answer must be traceable to vendor help <em>or</em> to a human-approved runbook synthesised from forums. No answer should trace only to a single anonymous forum post.</p></div>
+  <div class="two">
+    <div class="panel do"><h3>Do</h3><ul>
+      <li><strong>Search by symptom + exact error text</strong>, in English and Spanish: <span class="mono">site:community.spiceworks.com Outlook "cannot send"</span>, <span class="mono">site:reddit.com/r/techsupport "printer offline"</span>, <span class="mono">site:serverfault.com "shared drive access denied"</span>, <span class="mono">site:superuser.com "second monitor not detected"</span></li>
+      <li>Sort by most-viewed / most-upvoted; filter to the last 12–24 months — Windows 11 and Microsoft 365 change fast, and a 2019 printer-driver answer can be wrong now</li>
+      <li><strong>Triangulate every step:</strong> forum answer → vendor-published help → a second independent thread. Vendor docs win on product behaviour; forums win on how users describe it and what fails in practice</li>
+      <li><strong>Paraphrase and synthesise</strong> into your own runbook. Record the <em>idea</em> (queue → spooler → driver), not the poster's sentences. Keep a source link per entry</li>
+      <li>Note date, product version, and scope (one user vs whole office) on every note</li>
+      <li>Strip all personal data — never ingest usernames, emails, log excerpts, screenshots, or anything that could be a password, PHI, or customer data</li>
+      <li>Prefer accepted / highly-voted Stack Exchange answers and threads marked solved or with a staff reply</li>
+    </ul></div>
+    <div class="panel dont"><h3>Do not</h3><ul>
+      <li><strong>Do not paste or ingest forum posts verbatim</strong> into a RAG corpus or a commercial answer — quality risk and legal risk</li>
+      <li><strong>Do not scrape Reddit.</strong> Its User Agreement prohibits unauthorised scraping and commercial exploitation; Reddit has litigated unauthorised scraping for AI training (Reddit v. Anthropic; Reddit v. SerpAPI, S.D.N.Y. 2026). Scale use needs Reddit's licensed Data API / a commercial agreement — get legal advice first</li>
+      <li><strong>Do not bulk-ingest Stack Exchange verbatim.</strong> Posts are CC BY-SA 4.0: reuse requires author attribution, a link to the original question, and share-alike — a regime that doesn't map cleanly onto an AI answer</li>
+      <li>Do not treat Spiceworks, Reddit, Tom's Hardware, or BleepingComputer posts as authoritative — peer advice, sometimes wrong, sometimes for a different version</li>
+      <li>Never let the agent quote a forum post as vendor guidance, or run a forum-suggested registry / command-line fix unsupervised</li>
+      <li>Do not use BleepingComputer malware-log threads as a live playbook</li>
+    </ul></div>
+  </div>
+  <div class="tbl-wrap" style="margin-top:12px"><table>
+    <thead><tr><th></th><th>Vendor-published help</th><th>Community forum advice</th></tr></thead>
+    <tbody>
+      <tr><td data-l="">Authority</td><td data-l="Vendor help">Authoritative for that vendor's product, current version, supported steps</td><td data-l="Forum advice">Peer experience — may be outdated, version-specific, or wrong</td></tr>
+      <tr><td data-l="">Best use</td><td data-l="Vendor help">The <em>steps</em> the agent gives; link / cite these</td><td data-l="Forum advice">Symptoms in the user's words, the order technicians try things, “if step 1 fails” branches, escalation triggers</td></tr>
+      <tr><td data-l="">Failure mode</td><td data-l="Vendor help">Can be generic, or assume admin access the user doesn't have</td><td data-l="Forum advice">Can recommend unsafe steps — registry edits, drivers from untrusted sites, disabling security. Filter these out</td></tr>
+    </tbody></table></div>
+</section>
+
+<section id="gather">
+  <div class="sec-head"><h2>What to gather — and what it costs</h2>
+  <p><strong>Do you need to pay for any information sources? No.</strong> Every forum and vendor source in this base is free to read. The gathering work is time, not licences — your own procedures, plus each client's specifics. Paid access only enters the picture if you ever want Reddit or Stack Exchange content <em>at scale</em> under a commercial licence (see the research rules) — research reading needs none of it.</p></div>
+  <div class="two">
+    <div class="panel"><h3>1 · Your own playbook (the core)</h3><ul>
+      <li>One short entry per case in the library above: symptom in the user's words, steps in order, the “if step 1 fails” branch, and the escalation point</li>
+      <li>The 15 must-escalate triggers and the handoff packet</li>
+      <li>Guardrails: what the agent must never do, the escalation contact, business hours, and the “get a person” keywords</li></ul></div>
+    <div class="panel"><h3>2 · Per-company info (never reused across clients)</h3><ul>
+      <li>Email / identity platform (Microsoft 365 / Entra ID vs Google Workspace vs other), VPN product, printer and PC vendors</li>
+      <li>Line-of-business apps — EHR, dispatch, accounting — and who owns each</li>
+      <li>Wi-Fi names, shared-drive paths, self-service password-reset link, IT approver</li>
+      <li>Their policy on what the agent must never touch, and any internal guides they already have</li></ul>
+      <p class="small">The runbook steps here are generic — per-client versions will differ. This per-client configuration is still an open item (below).</p></div>
+    <div class="panel"><h3>3 · Public vendor docs (free)</h3><ul>
+      <li>Microsoft Support, Google Workspace Help, Apple Support, printer / PC vendor support</li>
+      <li>Retrieve the relevant passage at answer time, cite the source, and link out — don't copy whole articles in. That keeps answers current and licensing clean</li></ul></div>
+    <div class="panel"><h3>4 · Past questions &amp; fixes (builds itself)</h3><ul>
+      <li>Every resolved conversation becomes future knowledge</li>
+      <li>Questions the agent couldn't answer are the gap list — draft new entries from them, human-approved before they go live</li></ul></div>
+  </div>
+</section>
+
+<section id="open">
+  <div class="sec-head"><h2>Open questions — flagged plainly</h2></div>
+  <div class="openq"><ol>
+    <li><strong>Escalation contact / channel is not named.</strong> The human IT professional's name, phone, email, ticketing system, and hours aren't set yet. The agent cannot hand off safely without this configured per client.</li>
+    <li><strong>Client stack is unknown per business</strong> — email/identity platform, VPN, printer/PC vendors, and line-of-business apps. Runbook steps here are generic until each client is configured.</li>
+    <li><strong>Some forum URLs need a live check</strong> before going in a customer-facing list (Reddit, Server Fault, Super User, Stack Overflow, Tom's Hardware homepages came via search-result pages).</li>
+    <li><strong>CISA / FTC phishing wording</strong> was corroborated through secondary summaries, not the primary cisa.gov / consumer.ftc.gov pages — verify exact report routes before putting them in agent wording.</li>
+    <li><strong>HIPAA 2026 rule change is proposed, not final.</strong> The reported tightening (72-hour notification, mandatory MFA/encryption) must not be stated as current law — re-check HHS/OCR before any clinic-facing wording.</li>
+    <li><strong>Forum access rules change</strong> — free-to-read / account-to-post status is as of 13 Nov 2026, and Apple shows a forum can close on ~10 days' notice. Re-verify before launch.</li>
+  </ol></div>
+  <div class="callout red"><h3>Clinics — HIPAA, in brief</h3>
+  <p>A breach is presumed unless a documented four-factor risk assessment shows a low probability of compromise. Individuals must be notified without unreasonable delay and no later than 60 days after discovery; HHS must be notified too (500+ records within 60 days; under 500 logged and reported within 60 days after year-end). A vendor handling ePHI needs a signed Business Associate Agreement (BAA) <em>before</em> handling it — confirm the AI / hosting arrangement is covered before any clinic data touches the tool.</p></div>
+</section>
+
+<footer>
+  <p><strong>Sources</strong> — research run of 13 November 2026. Case steps synthesised from the Suptask runbook, InvGate, Microsoft Support, Premier Technologies, and Hogan; forum and licensing notes from each community's own pages; HIPAA notes from ComplyMD and AccountableHQ. Key sources:</p>
+  <ul class="src-list">
+    <li><a href="https://www.suptask.com//blog/help-desk-troubleshooting-guide" target="_blank" rel="noopener">Suptask — help desk troubleshooting guide</a></li>
+    <li><a href="https://blog.invgate.com/common-help-desk-tickets" target="_blank" rel="noopener">InvGate — common help desk tickets</a></li>
+    <li><a href="https://support.microsoft.com/en-gb/outlook/i-can-t-send-or-receive-messages-in-outlook" target="_blank" rel="noopener">Microsoft Support — Outlook send/receive</a></li>
+    <li><a href="https://www.premier-technologies.com/help-desk/" target="_blank" rel="noopener">Premier Technologies — help desk tiers</a></li>
+    <li><a href="https://www.teamhogan.com/news/five-common-help-desk-tickets" target="_blank" rel="noopener">Hogan — five common help desk tickets</a></li>
+    <li><a href="https://www.itregulators.com/blog/ransomware-attack-what-small-businesses-should-do-first/" target="_blank" rel="noopener">ITRegulators — ransomware first steps</a></li>
+    <li><a href="https://www.cloudhousetechnologies.com/blog/what-is-ransomware" target="_blank" rel="noopener">Cloudhouse — what is ransomware</a></li>
+    <li><a href="https://www.complymd.ai/blog/hipaa-breach-notification-requirements" target="_blank" rel="noopener">ComplyMD — HIPAA breach notification</a></li>
+    <li><a href="https://www.accountablehq.com/post/hipaa-compliance-requirements-for-small-business-a-practical-checklist" target="_blank" rel="noopener">AccountableHQ — HIPAA checklist for small business</a></li>
+    <li><a href="https://www.crossrivertechnology.com/insights/hiring-first-employees-it-onboarding-dallas/" target="_blank" rel="noopener">Cross River — IT onboarding</a></li>
+    <li><a href="https://www.primalarray.com/guides/employee-it-onboarding-offboarding-checklist" target="_blank" rel="noopener">Primal Array — onboarding/offboarding checklist</a></li>
+    <li><a href="https://discussions.apple.com/terms" target="_blank" rel="noopener">Apple — Support Community closure terms</a></li>
+    <li><a href="https://stackoverflow.blog/2009/06/25/attribution-required/" target="_blank" rel="noopener">Stack Overflow — attribution required (CC BY-SA)</a></li>
+    <li><a href="https://www.bleepingcomputer.com/forums/t/34773/preparation-guide-for-use-before-using-malware-removal-tools-and-requesting-help/" target="_blank" rel="noopener">BleepingComputer — malware help preparation guide</a></li>
+  </ul>
+  <p>Evidence status: mostly search-index plus text fetch of the Suptask runbook, InvGate, and Microsoft Support pages on 2026-11-13; forum homepages were not live-logged-in. No prices are stated in this base — none were verified in the research.</p>
+</footer>
+</div>
+
+<script>
+var CASES=[
+{cat:"Email / Outlook",title:"Can't send or receive email",v:"mixed",sym:"“My email won't send” · “I'm not getting emails” · messages stuck in Outbox",steps:["Check the internet — open a website.","In Outlook, use Sync / Send-Receive to force a manual sync.","Check the Outbox: a message with an attachment over 20 MB blocks everything behind it — remove the attachment or send it as a link.","Check Junk / Other / Focused tabs, rules, and quarantine.","Try Outlook on the web — if webmail works, it's a client problem, not a mailbox problem."],fail:"If webmail also fails, or there's a bounce, read the bounce code: 550 = permanent (bad address / blocked / policy); 421 / 451 = temporary, mail retries itself. Don't keep re-sending.",esc:"Several users can't send, mail flow stops, the same domain always bounces, or forwarding/rules appeared that the user didn't create — a compromise sign. A human runs a message trace and checks SPF / DKIM / DMARC and the restricted-senders list."},
+{cat:"Email / Outlook",title:"Mailbox full",v:"mixed",sym:"“Outlook says my mailbox is full” · “I can't send, it says quota”",steps:["Empty Deleted Items and Junk.","Sort by size; delete or detach the largest attachments.","Check OneDrive / cloud storage too — full cloud storage also blocks mail (Microsoft Support)."],fail:"Still full after emptying? The hidden Recoverable Items folder may be holding mail — an archive or quota increase is needed.",esc:"A quota can't be raised without a licence change, or it's a shared mailbox — human / admin decision, with the mailbox owner's agreement before any clean-up."},
+{cat:"Email / Outlook",title:"Calendar not syncing / wrong time",v:"mixed",sym:"“The meeting is on my laptop but not my phone” · “All my meetings moved an hour”",steps:["Compare against Outlook on the web — the server copy decides which device is wrong.","Check time zone / automatic time zone on each device.","Check whether the account is added twice on the phone."],fail:"Remove and re-add the account on the out-of-date device; check delegate permissions and duplicate calendar apps.",esc:"The whole team, or a room / resource calendar, is out of step — admin / room-mailbox work."},
+{cat:"Email / Outlook",title:"Teams / video-call problems",v:"mixed",sym:"“Nobody can hear me” · “My camera doesn't work” · “The call keeps freezing”",steps:["Check the device selected inside Teams / Zoom / Meet audio-video settings — not Windows settings.","Close other meeting apps — only one app can hold the camera.","Check the OS privacy permission for camera and microphone.","Use a headset for echo; run the app's test call."],fail:"Move to Ethernet; check whether VPN routing is hurting call quality; update or reinstall the meeting client.",esc:"Poor quality across a team or office — that's network capacity, not a client problem."},
+{cat:"Printers",title:"Won't print / shows offline",v:"mixed",sym:"“The printer isn't printing” · “It says offline” · “Nothing came out”",steps:["Check the printer is on, has paper and toner, and what its panel says. Check the correct printer is selected — defaults change after updates.","Check the print queue — clear stuck jobs and restart the Print Spooler.","Ask: can anyone else print to it?"],fail:"Remove and re-add the printer by IP address (not discovery); install the vendor driver, not the generic one; give a network printer a reserved / static IP.",esc:"A shared or floor printer is down for everyone — that's an incident, even though it feels routine. Also escalate repeated jams after clearing (torn paper inside), or any driver / firmware work needing admin rights."},
+{cat:"Printers",title:"Scanner / scan-to-email or scan-to-folder fails",v:"esc",sym:"“It scans but the email never arrives” · “Scan to folder says error”",steps:["Check the destination — email address or folder path — is correct.","Test a scan to USB or to the printer itself, to separate the scanner from the destination."],fail:"Scan-to-email fails at SMTP settings; scan-to-folder fails at share permissions. Both are admin-side — diagnose only.",esc:"Any SMTP, share, or permission change — human admin, always."},
+{cat:"Wi-Fi / Network",title:"No internet / no Wi-Fi",v:"mixed",sym:"“The internet is down” · “I can't connect to Wi-Fi” · “Wi-Fi connected but no internet”",steps:["Scope first: one machine, or everyone nearby?","Check airplane mode and any physical Wi-Fi switch. Check the network actually joined — the guest network is often picked up by accident.","Try Ethernet in a nearby port."],fail:"Forget the network and rejoin, typing the password fresh. Release and renew the address (ipconfig /release then /renew on Windows) — a 169.254 address means DHCP isn't answering. Restart the network adapter.",esc:"More than one user in the same area, nothing gets an address, or wired is also down — a network incident. DHCP scope, access point, ISP, and firewall are human / network-admin work."},
+{cat:"Wi-Fi / Network",title:"Slow internet / Wi-Fi dead zones",v:"mixed",sym:"“The internet is so slow today” · “Wi-Fi drops in the meeting room”",steps:["Run a speed test and note the number; note wired vs wireless and signal bars.","Is it everything, or one app / site?","Is anything large downloading or syncing — backup, update, OneDrive re-sync?"],fail:"Move to Ethernet and re-test (separates wireless from the circuit). Check the band — stuck on 2.4 GHz next to a 5 GHz access point — and location: concrete wall, edge of coverage.",esc:"Wired speed is also bad, or a whole site is affected — circuit / firewall / AP work. A genuine coverage gap needs hardware: a facilities / network project."},
+{cat:"VPN",title:"VPN won't connect",v:"mixed",sym:"“VPN won't connect” · “It says authentication failed”",steps:["Distinguish: never connects, vs connects then drops.","Check the VPN client version; check whether an MFA prompt is appearing.","Check the internet first — VPN can't work without it."],fail:"Update the VPN client (clean uninstall, not install-over). Check the certificate / profile hasn't expired. Try a different gateway or region if one exists.",esc:"Credentials or MFA can't be verified, several remote users drop at the same time (concentrator), or a certificate / gateway change is needed — human / network admin."},
+{cat:"VPN",title:"VPN connects, then drops",v:"mixed",sym:"“VPN keeps dropping every few minutes”",steps:["Reboot the home router first.","Test on a mobile hotspot — if it's stable there, the fault is the home Wi-Fi / ISP, not the VPN."],fail:"Pull the client logs and read the disconnect reason — an idle timeout is a policy setting, not a fault.",esc:"Drops for several users at once, or the fix needs a concentrator / policy change."},
+{cat:"Passwords / Accounts",title:"Forgot or expired password",v:"esc",sym:"“I forgot my password” · “It says my password expired”",steps:["Check Caps Lock, keyboard language, and that the username is right.","Guide the user to the official self-service reset (Microsoft / Google / company page). The user types their own new password there — the agent never sees, asks for, or types it.","After a change, update the password on the phone and any mapped drive — old saved passwords replaying cause repeat lockouts."],fail:"Self-service fails, or the user can't complete identity proof in the self-service flow.",esc:"Always escalate the reset itself to a human if self-service can't do it. The human verifies identity by policy (callback to a known number / manager confirmation), resets in the directory (Entra ID / AD / Google Workspace), sets change-at-next-login, and sends any temporary credential through a different channel. The AI never resets and never handles a temporary password."},
+{cat:"Passwords / Accounts",title:"Account locked out",v:"mixed",sym:"“I'm locked out” · “It says my account is locked”",steps:["Confirm whether it's a lockout or an expired password — they look identical to the user.","Ask whether they changed the password recently on one device only; clear the saved credential in Windows Credential Manager / Keychain on that device."],fail:"If it locks again within the hour, another device or service is still replaying the old password.",esc:"A human unlocks, after identity proof. Immediate escalation if several accounts lock at the same time — possible brute-force / security incident."},
+{cat:"Passwords / Accounts",title:"MFA / 2FA fails",v:"mixed",sym:"“The code doesn't work” · “The push never arrives” · “I lost my phone”",steps:["Check automatic date/time is on — clock drift rejects time-based codes.","Check notifications are allowed for the authenticator app.","Try a backup method before unenrolling anything."],fail:"Force a time sync and retry; switch from Wi-Fi to mobile data for a missing push; reinstall the authenticator app.",esc:"Any MFA reset, re-enrolment, lost device, or temporary bypass. MFA resets are exactly what social engineering targets — identity proof must be stronger than a chat confirmation, and a human must do it. Also escalate if MFA fails for a group (identity-provider problem)."},
+{cat:"Passwords / Accounts",title:"SSO login loop",v:"mixed",sym:"“It keeps sending me back to the login page”",steps:["Scope: one user, or everyone on that app?","Clear cookies for both the app and the identity-provider domain; try incognito or a different browser."],fail:"A human checks signing-certificate expiry, the attribute the app expects (email / UPN) against the directory record, and sign-in logs.",esc:"The loop hits everyone on an application — configuration / certificate failure. Identity owner, not Tier 1."},
+{cat:"Slow Computers",title:"Slow / laggy PC",v:"mixed",sym:"“My computer is so slow” · “Everything takes forever”",steps:["Restart properly — Shut down, then Start. Closing the lid isn't a restart; Fast Startup keeps the old session.","Open Task Manager / Activity Monitor; sort by memory, then CPU. Note how long since the last restart, and whether it's slow everywhere or in one app.","Close excess browser tabs; check free space on the system drive — under 10% free slows everything."],fail:"Trim startup items (Task Manager → Startup); clear temp files; check for a sync client, antivirus scan, or Windows update running during the day.",esc:"SMART warnings or drive errors, repeated slowness after the above, or the fix is a hardware upgrade (RAM / disk) — human, with a backup taken before any disk work."},
+{cat:"Slow Computers",title:"Blue / black screen (BSOD)",v:"esc",sym:"“My computer crashed to a blue / black screen”",steps:["Calm the user. Note the exact stop code and any faulting driver name shown.","Note what changed recently — driver, update, new hardware or dock — and whether it crashes at boot, at wake, or under load.","Offer a temporary machine if one is available (a human arranges it)."],fail:"There is no chat fix. A human boots to Safe Mode / WinRE, rolls back the driver or update, runs Windows Memory Diagnostic / chkdsk, and reads the minidump.",esc:"Escalate immediately. Especially if the same stop code appears on several machines after a patch cycle — stop the rollout."},
+{cat:"Software / Apps",title:"App won't open / crashes",v:"mixed",sym:"“Word / QuickBooks / [app] keeps crashing” · “It won't open”",steps:["Get the exact error text or a screenshot — “it crashed” and “file is in use” are different tickets.","Does it crash on open, or at one action? One user, or several? Was the app or OS updated in the last few days?","Try the same file / action on another machine."],fail:"Start the app with add-ins disabled (Office: hold Ctrl while launching). Repair the installation before reinstalling. Rename the app's local cache / profile folder so it rebuilds.",esc:"The same crash hits multiple users (bad release, or a service the app depends on), or the fix needs an install / reinstall with admin rights — human / vendor."},
+{cat:"Software / Apps",title:"App won't install / update; licence won't activate",v:"esc",sym:"“It won't install” · “It says I'm not licensed”",steps:["Check free disk space and whether an older version is still there.","Read the actual error code.","Check which account the app is signed into — users often have two — and whether a licence is assigned in the admin portal."],fail:"Diagnose only. Install from the company portal (not a download); sign out and back in with the licensed account; for a failed update, uninstall then install the current version fresh — all human/admin steps.",esc:"The package fails on more than one machine, a licence / seat problem, activation fails across the organisation after a renewal, or any install needing local admin — human / admin (and purchasing, if it's a licence issue)."},
+{cat:"Software / Apps",title:"SaaS / website won't load",v:"mixed",sym:"“The website won't load” · “[SaaS app] is down”",steps:["Check the vendor's status page first.","Does it load for anyone else?","Try incognito (rules out cache / extensions) and on a phone off the corporate network."],fail:"Sign out, clear cookies for that domain, sign back in via SSO; disable extensions one at a time.",esc:"Down for everybody — one incident, not forty tickets — or a firewall / DNS / proxy block: human / network admin or a vendor ticket."},
+{cat:"Software / Apps",title:"Browser problems",v:"mixed",sym:"“The page won't load / looks broken”",steps:["Same page in incognito; another browser; same page on a phone off the network.","Note the exact ERR_ code."],fail:"Clear cache and cookies for that one site only; disable extensions one at a time; update the browser and close every window.",esc:"A certificate or proxy problem hitting everyone — network / security team."},
+{cat:"Shared Drives / Files",title:"Can't access a shared drive — “Access denied”",v:"esc",sym:"“I can't open the shared drive” · “Access denied”",steps:["Scope: can a colleague in the same role open it? That separates a user problem from a broken permission.","Sign out and back in — group changes need a fresh token.","Check whether the user is on VPN if the share needs it; check the exact folder path / mapped-drive letter."],fail:"Diagnose only. A human confirms group membership and who owns the resource, adds the user to the group (not a direct folder grant), and confirms access with the user.",esc:"Always escalate the permission change itself — especially for sensitive data (finance, HR, patient files) or any exception to policy. Approval comes from the data owner, not the help desk. The AI never grants access."},
+{cat:"Shared Drives / Files",title:"File missing / “I deleted it” / sync conflict",v:"mixed",sym:"“My file is gone” · “I can't find the document” · “It says conflicted copy”",steps:["Where was it saved — local, network share, OneDrive / SharePoint / Drive?","Search by name and content; check Recent files in the app.","Check the Recycle Bin on the machine and the online recycle bin — OneDrive / SharePoint have a second, site-collection bin.","For a sync conflict, compare versions with the user before deleting anything — don't pick a version for them."],fail:"Use version history — an overwritten file comes back in seconds. For a share, Previous Versions / shadow copies. Pause and resume sync, or unlink / relink the sync client and let it re-index — do not delete the local folder.",esc:"Any restore from backup (a human restores to a different location, so nothing current is overwritten), a genuinely local file with no backup (stop writing to that disk immediately), or a deletion that looks deliberate (HR / security matter)."},
+{cat:"Monitors / Hardware",title:"Second monitor not detected / no display",v:"mixed",sym:"“My second screen is black” · “The monitor isn't detected”",steps:["Check the monitor is on and on the right input; check the cable is seated.","Press Win+P (Windows) or check display settings (macOS) — is it detected but not extended?","Plug the monitor straight into the laptop, bypassing the dock."],fail:"Power-cycle the dock properly — unplug from the mains for 30 seconds. Swap the cable before swapping the dock; cables fail more often. Detect displays manually and check the resolution / refresh the cable can carry.",esc:"The same dock model fails across the fleet, or any firmware / graphics-driver change — human / vendor."},
+{cat:"Monitors / Hardware",title:"Keyboard / mouse / USB not working",v:"mixed",sym:"“My keyboard stopped working” · “USB device not recognized”",steps:["Try a different port — on the machine, not a hub or dock. Check batteries, power switch, and dongle on wireless devices.","Test the device on another machine — that settles device vs machine."],fail:"A human checks Device Manager (yellow warning → uninstall device, scan for hardware changes), turns off USB selective suspend, and updates chipset / USB drivers from the laptop vendor.",esc:"Ports failing across a batch of the same model, or a replacement is needed — human (spare swap / warranty / ordering)."},
+{cat:"Monitors / Hardware",title:"PC won't turn on / hardware failure signs",v:"esc",sym:"“It won't turn on” · “It makes a noise and shuts off” · clicking · burning smell",steps:["Check the power cable, outlet, and (laptop) charger light. Hold the power button for a full shut-down, then try once more.","Ask about noises, smells, heat, and whether anything was dropped or spilled."],fail:"Do not open the machine. Do not keep retrying.",esc:"Escalate immediately — possible hardware failure. A human diagnoses, arranges a loan machine, and backs up before any further work if a drive may be failing. Burning smell, smoke, or heat: unplug, move away, do not use it."},
+{cat:"Phones / Mobile",title:"Email / apps on phone not working",v:"mixed",sym:"“Outlook on my phone won't sync” · “The app keeps crashing”",steps:["Check Wi-Fi vs mobile data — does it work on data?","Restart the phone.","Check the account isn't added twice; check app and OS updates."],fail:"Remove and re-add the account on the phone; reinstall the app — push tokens get stuck.",esc:"A lost or stolen phone, or any remote wipe, device enrolment, or MFA re-enrolment — human, with identity proof and the MDM action."},
+{cat:"Phones / Mobile",title:"Phone won't connect to office Wi-Fi / calls drop",v:"mixed",sym:"“My phone won't join the Wi-Fi”",steps:["Check the network name — staff vs guest — and airplane mode.","Forget the network and rejoin."],fail:"Check whether the phone is on the correct network / VPN profile for that site.",esc:"A whole-site mobile / Wi-Fi problem, or a network-profile change — human / network admin."},
+{cat:"Security / Phishing",title:"Suspicious email — not clicked",v:"esc",sym:"“I got a weird email — is this real?”",steps:["Do not click any link, open any attachment, reply, or use the unsubscribe link.","Do not use any phone number or link in the message to verify it — verify through a known channel: type the company's address yourself, call a number you already have.","Use the mail app's Report phishing / Report junk button."],fail:"There is no user fix. A human gets the original as an attachment (headers survive), checks the sender's real address and authentication results, searches the tenant, purges every copy, and blocks the sender / domain / URLs.",esc:"Escalate every report to the human IT / security contact — even unclicked — with sender, subject, time received, and whether anyone else got it. Immediately, if the same message reached several mailboxes (a campaign)."},
+{cat:"Security / Phishing",title:"Phishing — clicked / credentials entered / MFA approved",v:"esc",sym:"“I clicked the link and typed my password” · “I approved a prompt I didn't expect”",steps:["Stop. Don't click anything else; don't enter more information.","Change the password from a different, trusted device and turn on MFA — first aid only; the human must do the formal containment.","Note exactly what happened: link opened, file opened, credentials entered, MFA approved, information sent, payment initiated."],fail:"There is no “step 1 fails” here — this is already an incident.",esc:"Escalate immediately as a security incident. A human resets the password and revokes all sessions (a reset alone leaves tokens valid), re-registers MFA, deletes mailbox rules / forwarding / app consents the attacker created, reviews sign-in logs and Sent items, warns recipients, and isolates / scans the machine if an attachment was opened. If bank, SSN, or card data was entered, also point to IdentityTheft.gov / the bank (FTC guidance)."},
+{cat:"Security / Phishing",title:"Possible malware / pop-ups / fake “infected” warning",v:"esc",sym:"“My computer is acting weird” · pop-ups · programs opening by themselves",steps:["Don't click any pop-up; don't download a “cleaner” from the warning.","Ask what the endpoint protection actually reported (the detection name) and when the behaviour changed / what was downloaded.","Tell the user to stop working on the machine."],fail:"No further user steps — this is an escalation, not a guided fix.",esc:"Escalate immediately. A human disconnects it from the network first, leaves it powered on (preserves memory / forensics), runs a full scan from the management console, checks persistence, resets credentials, and reimages if it's ransomware, a rootkit, or uncertain."}
+];
+
+var ESC=[
+{n:1,t:"Suspected malware / ransomware",trig:"Files encrypted or renamed, a ransom note on screen, endpoint protection reports a detection, files changing by themselves, or more than one machine showing the same detection.",collect:"Device name / asset tag, user, exact detection name + file path if shown, when behaviour changed, what was downloaded or opened, whether others are affected, a phone photo of any ransom note (don't copy note text with an address/link into chat).",aid:"Disconnect from the network (pull the Ethernet cable, turn Wi-Fi off). Leave the machine powered ON. Do not restart repeatedly, do not plug in a backup drive, do not pay or reply to the ransom demand, do not keep using the machine."},
+{n:2,t:"Data loss / deletion with no backup",trig:"File or folder missing and not in either Recycle Bin or version history; a local-only file with no backup; a whole shared folder or mailbox missing.",collect:"File / folder name, where it was saved (local / share / OneDrive / SharePoint), when it was last seen, who else uses it, whether anyone else deleted or moved it.",aid:"Stop writing to that disk immediately — continued use overwrites what could be recovered. Don't run a recovery tool; don't restore anything yourself. A human restores from backup to a different location and confirms the version with the user."},
+{n:3,t:"Account compromise",trig:"Sign-in from an unfamiliar place, mail the user didn't send, rules or forwarding the user didn't create, a password changed without the user doing it, MFA prompts the user didn't trigger.",collect:"User, when the odd sign-in or mail was noticed, any unfamiliar locations / devices, whether credentials were entered on a fake page, whether an MFA prompt was approved, who received mail from the account.",aid:"Don't use the account further. A human blocks sign-in and revokes ALL sessions, resets the password, re-registers MFA, deletes rules / forwarding / app consents, reviews logs, and warns recipients. Escalate from the point it's suspected — not from the point it's confirmed."},
+{n:4,t:"Hardware failure",trig:"PC won't turn on, repeated blue screens, clicking or grinding, burning smell or heat, drive SMART errors, ports failing across a batch, monitor / dock failure across the fleet.",collect:"Device make / model / asset tag, symptoms and when they started, any recent drop, spill, or update, whether data on it is backed up, whether a loan machine is needed.",aid:"Unplug if there's a smell, smoke, or heat. Otherwise stop retrying and stop using it. A human diagnoses, arranges a loan machine, and backs up before any disk work."},
+{n:5,t:"Network outage affecting everyone",trig:"Whole office, floor, or site without internet or Wi-Fi; no one can reach shared drives or printers; VPN down for several remote users; DNS failing broadly.",collect:"How many people / which area, when it started, whether wired AND wireless are affected, any ISP / router lights or messages, whether the office router or access point was touched.",aid:"Tell users not to keep changing their own network settings — it creates extra work for the human. A human checks ISP, router / firewall, DHCP, DNS, and access points, and posts ONE update to users instead of answering the same ticket forty times."},
+{n:6,t:"Admin / permission changes",trig:"Any request to grant, change, or remove access to a folder, mailbox, app, or system; licence / seat changes; group-membership changes.",collect:"Who needs access, to what exactly (read vs edit), why, manager / data-owner approval, start and end date if temporary.",aid:"None — the agent records the request and routes it for approval. It never grants, changes, or removes access itself."},
+{n:7,t:"Password reset needing identity proof",trig:"Self-service reset fails, the user can't complete identity proof, the account is locked or suspended, MFA must be reset, or the request comes from someone other than the account holder.",collect:"Full name, username / email, what the user can still access, a callback number the business already has on file, manager name.",aid:"Direct the user to the official self-service reset only. Never ask for, receive, or relay any password or MFA code. A human verifies identity by policy and resets in the directory."},
+{n:8,t:"Security incident (general)",trig:"Phishing clicked with credentials / MFA given, suspected breach, unauthorised access, data sent to the wrong person, a lost or stolen laptop or phone with company data, multiple accounts locking at once.",collect:"What happened, in order, with times; what was clicked / opened / entered / approved / sent; who else is affected; the device involved.",aid:"Contain only as in the relevant row — disconnect, stop using the account or device, don't delete the message or evidence. Human / security owns containment, investigation, and notification."},
+{n:9,t:"Backup / restore",trig:"Any restore request, a backup failure, or “is this backed up?” where the answer matters.",collect:"What needs restoring, from when, where it lived, who owns the data.",aid:"Don't restore, don't delete, don't overwrite. A human restores to a different location and verifies with the data owner."},
+{n:10,t:"Compliance / PHI issues (clinics)",trig:"Any case involving patient data (PHI / ePHI), the EHR, a misdirected email or message containing PHI, a lost device with patient data, a suspected breach of patient data, or any request to access, export, or share patient records.",collect:"What system / data is involved, when it happened, who was affected (a count, not names in chat unless the human's secure channel requires it), whether the data left the clinic's systems — and NO PHI itself in the chat.",aid:"Do not ask for, paste, or store any PHI in chat. Stop, preserve what happened (times, system), and escalate immediately to the clinic's privacy / compliance contact AND human IT."},
+{n:11,t:"Remote access on the user's behalf",trig:"Any request for the agent or IT to “take over my screen,” install software remotely, or change settings on the user's machine.",collect:"User, device, what needs doing, whether the user is present and consents, best contact method and time.",aid:"The AI never starts remote access on its own. A human may do so only through the business's approved remote tool, with the user present and consenting."},
+{n:12,t:"Data deletion / wiping",trig:"Any request to delete files, mailboxes, or accounts, or to wipe / retire a device.",collect:"What exactly, why, who approved it, whether a backup or transfer is needed first.",aid:"The AI never deletes anything. A human confirms approval and backup / transfer, then performs it."},
+{n:13,t:"System changes needing admin rights",trig:"An install, reinstall, or update requiring local admin; driver or firmware updates; OS reinstall / reimage; certificate changes.",collect:"App name and version, exact error code, device, whether others are affected.",aid:"Guide only up to the admin boundary — e.g. “install from the company portal.” A human / admin performs the change."},
+{n:14,t:"Vendor / tenant-wide outage",trig:"A vendor status page confirms an outage, or the same failure hits everyone — mail flow, a SaaS app, the identity provider.",collect:"Vendor / app name, status-page wording, how many users, when it started, any error text.",aid:"Tell users it's a known outage, don't reinstall or reconfigure anything, and wait for the vendor / human update. A human owns the vendor ticket and user communications."},
+{n:15,t:"Unidentified case — or the business is stopped",trig:"Error text doesn't match a known case, the same fix has already failed twice, the user says “everything is down,” or the problem stops patient care, dispatch, or billing. Also: a distressed user.",collect:"Everything the user has already tried, exact error text / screenshot description, scope (who else), business impact.",aid:"Say plainly that you're escalating, give the human contact and expected response, and do not guess a fix."}
+];
+
+var vLabel={guide:"AI can guide",mixed:"Guide → escalate if…",esc:"Escalate to human"};
+var activeCat="All", activeVerdict="all", query="";
+
+var cats=["All"].concat(Array.from(new Set(CASES.map(function(c){return c.cat;}))));
+var chipWrap=document.getElementById("catChips");
+cats.forEach(function(c){
+  var b=document.createElement("button"); b.className="chip"; b.type="button"; b.textContent=c;
+  b.setAttribute("aria-pressed", c==="All"?"true":"false");
+  b.addEventListener("click",function(){ activeCat=c; Array.prototype.forEach.call(chipWrap.children,function(x){x.setAttribute("aria-pressed","false");}); b.setAttribute("aria-pressed","true"); render(); });
+  chipWrap.appendChild(b);
+});
+Array.prototype.forEach.call(document.querySelectorAll("[data-verdict]"),function(b){
+  b.addEventListener("click",function(){
+    activeVerdict=b.getAttribute("data-verdict");
+    Array.prototype.forEach.call(document.querySelectorAll("[data-verdict]"),function(x){x.setAttribute("aria-pressed","false");});
+    b.setAttribute("aria-pressed","true"); render();
+  });
+});
+document.getElementById("q").addEventListener("input",function(e){ query=e.target.value.toLowerCase().trim(); render(); });
+
+function render(){
+  var grid=document.getElementById("caseGrid"); grid.innerHTML="";
+  var shown=0;
+  CASES.forEach(function(c){
+    var hay=(c.cat+" "+c.title+" "+c.sym+" "+c.steps.join(" ")+" "+c.esc).toLowerCase();
+    if(activeCat!=="All"&&c.cat!==activeCat) return;
+    if(activeVerdict!=="all"&&c.v!==activeVerdict) return;
+    if(query&&hay.indexOf(query)===-1) return;
+    shown++;
+    var d=document.createElement("article"); d.className="case";
+    var stepsHtml=c.steps.map(function(s){return "<li>"+s+"</li>";}).join("");
+    d.innerHTML='<div class="case-top"><div><div class="cat">'+c.cat+'</div><h3>'+c.title+'</h3></div><span class="verdict '+c.v+'">'+vLabel[c.v]+'</span></div>'
+      +'<p class="symptom">'+c.sym+'</p>'
+      +'<details><summary>Steps, fallback &amp; escalation</summary>'
+      +'<div class="label">First steps, in order</div><ol>'+stepsHtml+'</ol>'
+      +'<div class="label">If step 1 fails</div><p style="font-size:14.5px;margin:4px 0">'+c.fail+'</p>'
+      +'<div class="esc-box"><b>Escalate when:</b> '+c.esc+'</div></details>';
+    grid.appendChild(d);
+  });
+  document.getElementById("countLine").textContent="Showing "+shown+" of "+CASES.length+" cases";
+  document.getElementById("noResults").hidden=shown>0;
+}
+render();
+
+var eg=document.getElementById("escGrid");
+ESC.forEach(function(e){
+  var d=document.createElement("article"); d.className="esc-card";
+  d.innerHTML='<h3><span class="num">'+e.n+'</span>'+e.t+'</h3>'
+    +'<p><b>Trigger:</b> '+e.trig+'</p>'
+    +'<p><b>Collect before handoff:</b> '+e.collect+'</p>'
+    +'<p class="aid"><strong>Safe first-aid the agent may give:</strong> '+e.aid+'</p>';
+  eg.appendChild(d);
+});
+
+document.getElementById("copyBtn").addEventListener("click",function(){
+  var t=document.getElementById("packetText").textContent;
+  var msg=document.getElementById("copyMsg");
+  function done(){ msg.textContent="Copied — paste it into the ticket / message to the human."; setTimeout(function(){msg.textContent="";},4000); }
+  if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(t).then(done).catch(function(){ fallback(); }); } else { fallback(); }
+  function fallback(){ var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand("copy"); done();}catch(err){ msg.textContent="Copy failed — select the text above manually."; } document.body.removeChild(ta); }
+});
+</script>
+</body>
+</html>

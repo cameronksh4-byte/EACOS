@@ -22,6 +22,15 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 CONFIDENCE_THRESHOLD = 0.80  # Hard guardrail #2. Settings may raise it, never lower it.
+# SOPs whose doc_id starts with this are escalate-only (the shared knowledge
+# base's must-escalate triggers and escalate cases; clients may use it too).
+# Citing one never resolves a ticket: the agent gives the SOP's safe first aid,
+# collects the handoff packet, and a human takes it.
+ESCALATE_ONLY_DOC_PREFIX = "KB-ESC-"
+
+
+def is_escalate_only(doc_id: str) -> bool:
+    return doc_id.upper().startswith(ESCALATE_ONLY_DOC_PREFIX)
 DOC_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -381,6 +390,15 @@ class AgentTriageResult(_Strict):
             self.requires_tier2_escalation = True
             if self.action in (TriageAction.RESOLVE, TriageAction.AWAIT_MANAGER_APPROVAL) and not self.active_outage_detected:
                 self.action = TriageAction.ESCALATE_TIER_2
+
+        # Escalate-only SOPs: a human always takes it, and is told now even while
+        # the agent asks a question to complete the handoff packet.
+        if not self.active_outage_detected and any(is_escalate_only(d) for d in self.cited_sop_ids):
+            if self.action in (TriageAction.RESOLVE, TriageAction.AWAIT_MANAGER_APPROVAL):
+                self._escalate("escalate_only_sop")
+            elif not self.requires_tier2_escalation:
+                self._override("escalate_only_sop")
+                self.requires_tier2_escalation = True
 
         # Guardrail #2 for any outcome that shows troubleshooting steps.
         if self.action is TriageAction.RESOLVE and not self.active_outage_detected:

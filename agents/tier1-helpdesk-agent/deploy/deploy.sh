@@ -11,7 +11,7 @@
 # Helpers that need no AWS access (they create and use deploy/.venv):
 #   deploy/deploy.sh <client>.env --check              # validate the env file only
 #   deploy/deploy.sh <client>.env --ping-n8n           # can the agent reach n8n, and do the secrets match?
-#   deploy/deploy.sh <client>.env --sync-sops [--prune]  # re-load SOP_DIR (and WEBCHAT_SOP_DIR) after editing SOPs
+#   deploy/deploy.sh <client>.env --sync-sops [--prune]  # re-load SOP_DIR (plus WEBCHAT_SOP_DIR, SHARED_KB_DIR) after editing SOPs
 #
 # Steps (idempotent, so re-running is safe; it stops at the first error):
 #   1  preflight: tools, AWS identity, deploy.env validated by the app's own config rules
@@ -134,12 +134,14 @@ HOSTNAME_="$(cfg PUBLIC_HOSTNAME)"
 TIER="$(cfg SERVICE_TIER)"; TIER="${TIER:-TIER_0_INCENTIVE}"
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
 
-# Loads SOP_DIR for the client, and WEBCHAT_SOP_DIR for the website chat's own
-# tenant. Talks to Supabase and Voyage directly with the keys from deploy.env.
+# Loads SOP_DIR for the client, WEBCHAT_SOP_DIR for the website chat's own
+# tenant, and SHARED_KB_DIR (the baseline knowledge base every tenant also
+# searches) for SHARED_KB_TENANT_ID. Talks to Supabase and Voyage directly with
+# the keys from deploy.env.
 sync_sops() {
   export SUPABASE_URL SUPABASE_SERVICE_KEY VOYAGE_API_KEY
   SUPABASE_URL="$(cfg SUPABASE_URL)"; SUPABASE_SERVICE_KEY="$(cfg SUPABASE_SERVICE_KEY)"; VOYAGE_API_KEY="$(cfg VOYAGE_API_KEY)"
-  local prune_args=() sop_dir web_dir web_tenant
+  local prune_args=() sop_dir web_dir web_tenant kb_dir kb_tenant
   [[ $PRUNE -eq 1 ]] && prune_args=(--prune)
   sop_dir="$(cfg SOP_DIR)"
   if [[ -n "$sop_dir" ]]; then
@@ -150,7 +152,16 @@ sync_sops() {
     web_tenant="$(cfg WEBCHAT_TENANT_ID)"; web_tenant="${web_tenant:-web-demo}"
     ( cd "$ROOT" && "$PY" -m ingest.sync_docs --tenant "$web_tenant" --docs "$web_dir" ${prune_args[@]+"${prune_args[@]}"} )
   fi
-  if [[ -z "$sop_dir" && -z "$web_dir" ]]; then note "SOP_DIR and WEBCHAT_SOP_DIR are both empty: nothing to load"; fi
+  kb_dir="$(cfg SHARED_KB_DIR)"
+  if [[ -n "$kb_dir" ]]; then
+    kb_tenant="$(cfg SHARED_KB_TENANT_ID)"; kb_tenant="${kb_tenant:-shared-kb}"
+    ( cd "$ROOT" && "$PY" -m ingest.build_shared_kb --check ) \
+      || die "knowledge_base/sops is out of date with its source page: run python -m ingest.build_shared_kb"
+    ( cd "$ROOT" && "$PY" -m ingest.sync_docs --tenant "$kb_tenant" --docs "$kb_dir" ${prune_args[@]+"${prune_args[@]}"} )
+  fi
+  if [[ -z "$sop_dir" && -z "$web_dir" && -z "$kb_dir" ]]; then
+    note "SOP_DIR, WEBCHAT_SOP_DIR and SHARED_KB_DIR are all empty: nothing to load"
+  fi
 }
 
 if [[ $SYNC_SOPS -eq 1 ]]; then

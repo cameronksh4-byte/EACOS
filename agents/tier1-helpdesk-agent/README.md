@@ -121,7 +121,8 @@ cp .env.example .env         # fill in keys
 
 # Database: apply the migration in the Supabase SQL editor or with `supabase db push`
 #   supabase/migrations/001_init_schema.sql
-python -m ingest.sync_docs --tenant acme-corp --docs ingest/sample_sops    # load SOPs
+python -m ingest.sync_docs --tenant acme-corp --docs ingest/sample_sops    # load the client's SOPs
+python -m ingest.sync_docs --tenant shared-kb --docs knowledge_base/sops --prune  # baseline KB (once per project)
 
 make run
 curl -s localhost:8000/v1/triage -H "x-webhook-secret: $WEBHOOK_SECRET" -H 'content-type: application/json' \
@@ -134,6 +135,33 @@ SOP files are Markdown with frontmatter: `doc_id`, `title`, `system_name`,
 For Tier 1 approvals, fill the `app_catalog` table (item, aliases, whether approval is needed,
 `approver_role`, `provisioning_group`, `doc_id`). Whether something needs approval is decided by
 this table, never by the model.
+
+### Baseline knowledge base
+
+`knowledge_base/sops/` is a help-desk knowledge base every tenant searches alongside its own SOPs.
+It is loaded once into its own tenant (`SHARED_KB_TENANT_ID`, default `shared-kb`, which can never be
+a client or the website tenant), so updating it reaches every client at once.
+
+- `cases/` — 30 common Tier 1 cases (email, printing, network, VPN, accounts, performance, apps,
+  files, hardware, mobile, security), generated from
+  `knowledge_base/source/IT_Help_Desk_RAG_Knowledge_Base.html` by `python -m ingest.build_shared_kb`.
+  The page is read as data only (its script is never run); a test fails if the Markdown and the page
+  drift apart, and the deploy refuses to load a stale copy.
+- `escalation/` — 15 must-escalate triggers (security, PHI, hardware failure, outages…), also generated.
+- `policy/` — hand-written: guardrails, the handoff packet, onboarding/offboarding, field notes.
+
+Ranking: when a client SOP and a baseline SOP match about equally (within 0.03), the client's wins.
+The model sees each SOP labelled `source="client"` or `source="baseline"` and must not apply
+product-specific baseline steps (a VPN client, an MDM, a portal) unless the ticket shows that product.
+
+Any SOP whose `doc_id` starts with `KB-ESC-` is **escalate-only**: the agent may give the first-aid
+steps it contains, but citing it always alerts a person (enforced in `AgentTriageResult`, not just in
+the prompt). The reply tells the user who will follow up through `TIER2_CONTACT_HINT`, so set that
+per client to a real team or phone number.
+
+Open points carried over from the source page, to confirm before relying on them: the 2026 HIPAA
+Security Rule update is a proposed rule, not final; the CISA/FTC phishing wording and the vendor
+forum links were not verified.
 
 Identity (Tier 1): `IDENTITY_PROVIDER=microsoft_graph` needs app permissions `User.Read.All` and
 `DeviceManagementManagedDevices.Read.All`. `AuditLog.Read.All` (Entra ID P1+) is optional, for the
@@ -223,7 +251,8 @@ app/
     reports.py             weekly executive report
     webchat.py             public website chat: metering, sandboxed answers, plans and credits
     chunking.py, notifier.py, signing.py, background.py, supabase_client.py, ticketing.py
-ingest/                    SOP ingest CLI, catalog/directory loader, samples
+ingest/                    SOP ingest CLI, catalog/directory loader, samples, build_shared_kb
+knowledge_base/            baseline KB shared by every tenant (source page + generated SOPs)
 deploy/                    deploy.sh, deploy.env.example, DEPLOY.md, DEPLOY_PROMPT.md, smoke test
 integrations/              Slack app manifest, n8n workflows, website free trial (+ sources and tests)
 supabase/migrations/       schema, RLS, SQL functions; supabase/tests/ = SQL checks

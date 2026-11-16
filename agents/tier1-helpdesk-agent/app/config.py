@@ -181,6 +181,10 @@ class Settings(BaseSettings):
     supabase_service_key: SecretStr = SecretStr("")
     rag_top_k: int = Field(4, ge=1, le=20)
     rag_min_similarity: float = Field(0.55, ge=0.0, le=1.0)
+    # Shared baseline knowledge base (knowledge_base/sops), ingested once under this
+    # reserved tenant id and searched alongside every client's own SOPs. It must
+    # never be a client or website tenant. Empty switches the baseline off.
+    shared_kb_tenant_id: str = Field("shared-kb", pattern=r"^$|^[a-z0-9-]{2,64}$")
     voyage_api_key: SecretStr = SecretStr("")
     embedding_model: str = "voyage-3.5"
     embedding_dimensions: int = Field(1024, description="Must match vector(N) in the migration")
@@ -323,7 +327,8 @@ class Settings(BaseSettings):
     # --- Tenancy & budget -----------------------------------------------------
 
     def is_tenant_allowed(self, tenant_id: str) -> bool:
-        return tenant_id in self.allowed_tenant_ids
+        # The shared baseline tenant holds no tickets; nothing may be filed under it.
+        return tenant_id in self.allowed_tenant_ids and tenant_id != self.shared_kb_tenant_id
 
     def budget_for(self, tenant_id: str) -> float:
         default = (self.webchat_monthly_budget_usd if tenant_id == self.webchat_tenant_id
@@ -391,6 +396,10 @@ class Settings(BaseSettings):
             required["N8N_OUTBOUND_SIGNING_SECRET"] = self.n8n_outbound_signing_secret.get_secret_value()
         if self.feature_enabled(Feature.KNOWLEDGE_FLYWHEEL):
             required["N8N_CALLBACK_SECRET"] = self.n8n_callback_secret.get_secret_value()  # draft approvals
+
+        if self.shared_kb_tenant_id and self.shared_kb_tenant_id in (*self.allowed_tenant_ids, self.webchat_tenant_id):
+            # The baseline is read by every tenant, so a client writing into it would leak.
+            required["SHARED_KB_TENANT_ID different from every client and website tenant"] = None
 
         if self.webchat_enabled:
             secret = self.webchat_signing_secret.get_secret_value()

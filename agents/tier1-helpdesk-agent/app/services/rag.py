@@ -3,7 +3,9 @@
 The ticket (plus any screenshot findings) is embedded once with Voyage AI. The
 same vector feeds outage detection and SOP search. `match_sop_chunks` filters
 by tenant_id, and optionally by os_platform, inside the database, so one
-client's SOPs can never come back for another.
+client's SOPs can never come back for another. The only other rows it can
+return are the shared baseline knowledge base (SHARED_KB_TENANT_ID): generic
+Tier 1 cases and must-escalate triggers every client gets, flagged `shared`.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 import logging
 
 import httpx
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import get_settings
 from app.schemas.ticket import IncomingTicketWebhook, VisionContext
@@ -31,6 +33,7 @@ class SopChunk(BaseModel):
     os_platform: str = "any"
     content: str
     similarity: float
+    shared: bool = Field(False, validation_alias=AliasChoices("is_shared", "shared"))
 
 
 def _voyage_client() -> httpx.AsyncClient:
@@ -93,7 +96,7 @@ async def retrieve_relevant_sops(
     embedding: list[float] | None = None,
     min_similarity: float | None = None,
 ) -> list[SopChunk]:
-    """Closest SOP chunks for this tenant, best first. Raises on I/O errors."""
+    """Closest SOP chunks for this tenant (plus the shared baseline), best first. Raises on I/O errors."""
     settings = get_settings()
     vector = embedding if embedding is not None else await embed_query(query)
     rows = await supabase_client.rpc(
@@ -104,10 +107,12 @@ async def retrieve_relevant_sops(
             "p_match_count": top_k or settings.rag_top_k,
             "p_min_similarity": settings.rag_min_similarity if min_similarity is None else min_similarity,
             "p_os_platform": os_platform,
+            "p_shared_tenant_id": settings.shared_kb_tenant_id or None,
         },
     )
     chunks = [SopChunk.model_validate(row) for row in rows]
-    logger.info("rag tenant=%s os=%s matched=%d", tenant_id, os_platform or "any", len(chunks))
+    logger.info("rag tenant=%s os=%s matched=%d shared=%d", tenant_id, os_platform or "any", len(chunks),
+                sum(c.shared for c in chunks))
     return chunks
 
 

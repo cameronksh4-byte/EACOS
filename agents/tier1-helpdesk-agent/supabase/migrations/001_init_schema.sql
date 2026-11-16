@@ -93,12 +93,21 @@ create trigger sop_chunks_updated_at before update on public.sop_chunks
 
 -- p_os_platform (Tier 1 context enrichment) is a hard metadata filter.
 -- Platform-agnostic SOPs ('any') always qualify.
+--
+-- p_shared_tenant_id adds the shared baseline knowledge base (generic Tier 1
+-- cases and must-escalate triggers, ingested under a reserved tenant id that
+-- no client may use). Only the client's own tenant and that one shared tenant
+-- are ever searched, so one client's SOPs still never reach another. When a
+-- client SOP and a baseline SOP score within 0.03 of each other, the client's
+-- own version ranks first: it names their real products, links and paths.
+drop function if exists public.match_sop_chunks(text, vector, int, float, text);
 create or replace function public.match_sop_chunks(
-    p_tenant_id       text,
-    p_query_embedding vector(1024),
-    p_match_count     int   default 4,
-    p_min_similarity  float default 0.55,
-    p_os_platform     text  default null
+    p_tenant_id        text,
+    p_query_embedding  vector(1024),
+    p_match_count      int   default 4,
+    p_min_similarity   float default 0.55,
+    p_os_platform      text  default null,
+    p_shared_tenant_id text  default null
 )
 returns table (
     doc_id      text,
@@ -106,22 +115,26 @@ returns table (
     system_name text,
     os_platform text,
     content     text,
-    similarity  float
+    similarity  float,
+    is_shared   boolean
 )
 language sql stable
 set search_path = public, extensions
 as $$
     with candidates as materialized (
         select c.doc_id, c.title, c.system_name, c.os_platform, c.content,
-               1 - (c.embedding <=> p_query_embedding) as similarity
+               1 - (c.embedding <=> p_query_embedding) as similarity,
+               c.tenant_id <> p_tenant_id as is_shared
         from public.sop_chunks c
-        where c.tenant_id = p_tenant_id
+        where (c.tenant_id = p_tenant_id
+               or (p_shared_tenant_id is not null and p_shared_tenant_id <> p_tenant_id
+                   and c.tenant_id = p_shared_tenant_id))
           and (p_os_platform is null or c.os_platform in ('any', p_os_platform))
     )
-    select doc_id, title, system_name, os_platform, content, similarity
+    select doc_id, title, system_name, os_platform, content, similarity, is_shared
     from candidates
     where similarity >= p_min_similarity
-    order by similarity desc
+    order by similarity + case when is_shared then 0.0 else 0.03 end desc, similarity desc
     limit least(greatest(p_match_count, 1), 20);
 $$;
 

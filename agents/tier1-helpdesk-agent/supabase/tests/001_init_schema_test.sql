@@ -41,6 +41,35 @@ begin
         'similarity threshold not applied';
 end $$;
 
+-- Shared baseline knowledge base: searched alongside the client's own SOPs only.
+insert into sop_chunks (id, tenant_id, doc_id, title, os_platform, chunk_index, content, content_hash, embedding) values
+ ('shared-kb:KB-VPN-01#0', 'shared-kb', 'KB-VPN-01', 'Baseline VPN', 'any',   0, 'generic', 'h5', pg_temp.axis(1)),
+ ('shared-kb:KB-MAC-01#0', 'shared-kb', 'KB-MAC-01', 'Baseline Mac', 'macos', 0, 'generic', 'h6', pg_temp.blend(0.99));
+
+do $$
+declare ids text[]; r record;
+begin
+    -- Without the shared tenant, nothing changes.
+    select array_agg(doc_id order by doc_id) into ids from match_sop_chunks('acme', pg_temp.axis(1), 10, 0.5, null);
+    assert not ('KB-VPN-01' = any(ids)), 'shared KB returned without being asked for';
+
+    select array_agg(doc_id order by doc_id) into ids
+    from match_sop_chunks('acme', pg_temp.axis(1), 10, 0.5, 'windows', 'shared-kb');
+    assert ids = array['KB-VPN-01','SOP-GEN','SOP-VPN-WIN'], format('shared + os filter wrong: %s', ids);
+    assert not ('SOP-X' = any(ids)), 'cross-tenant leak with shared KB';
+
+    -- A tie goes to the client's own SOP; baseline rows are flagged.
+    select * into r from match_sop_chunks('acme', pg_temp.axis(1), 1, 0.5, 'windows', 'shared-kb');
+    assert not r.is_shared and r.doc_id in ('SOP-GEN','SOP-VPN-WIN'), format('client SOP should win a tie: %s', r);
+    select * into r from match_sop_chunks('acme', pg_temp.axis(1), 10, 0.5, null, 'shared-kb') where doc_id = 'KB-VPN-01';
+    assert r.is_shared, 'baseline row not flagged as shared';
+
+    -- Querying as the shared tenant never reaches a client's rows.
+    select array_agg(doc_id order by doc_id) into ids from match_sop_chunks('shared-kb', pg_temp.axis(1), 10, 0.5, null, 'shared-kb');
+    assert ids = array['KB-MAC-01','KB-VPN-01'], format('shared tenant query wrong: %s', ids);
+end $$;
+delete from sop_chunks where tenant_id = 'shared-kb';
+
 -- ---------------------------------------------------------------------------
 -- Outage burst: 5 similar tickets in window -> one incident for the cluster
 -- ---------------------------------------------------------------------------
