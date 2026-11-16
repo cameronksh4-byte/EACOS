@@ -391,3 +391,32 @@ def env(monkeypatch):
     sb.sops = [{"doc_id": "SOP-NET-001", "title": "VPN", "system_name": "GlobalProtect", "os_platform": "any",
                 "content": "1. Disconnect and reconnect", "similarity": 0.81}]
     return {"sb": sb, "claude": claude, "embedded": embedded, "notified": notified, "n8n": n8n, "n8n_up": n8n_up}
+
+
+TIER1_ENV = {
+    "SERVICE_TIER": "TIER_1_PRODUCTION",
+    "PUBLIC_BASE_URL": "https://helpdesk.acme.com",
+    "N8N_APPROVAL_WEBHOOK_URL": "https://n8n.acme.com/webhook/approvals",
+    "N8N_OUTBOUND_SIGNING_SECRET": "outbound-secret",
+    "N8N_CALLBACK_SECRET": "callback-secret",
+}
+TIER2_ENV = {**TIER1_ENV, "SERVICE_TIER": "TIER_2_MANAGED_OPS",
+             "N8N_NOTIFY_WEBHOOK_URL": "https://n8n.acme.com/webhook/notify"}
+
+
+def _set_env(monkeypatch, values: dict[str, str]) -> None:
+    from app.config import get_settings
+
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def tier1(monkeypatch):
+    _set_env(monkeypatch, TIER1_ENV)
+
+
+@pytest.fixture
+def tier2(monkeypatch):
+    _set_env(monkeypatch, TIER2_ENV)

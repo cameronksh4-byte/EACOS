@@ -26,4 +26,4 @@ def _fresh_settings():
     get_settings.cache_clear()
 
 
-from tests.fakes import env  # noqa: E402,F401  (shared fixture: fake Supabase/Claude/Voyage/n8n)
+from tests.fakes import env, tier1, tier2  # noqa: E402,F401  (shared fixtures: fakes and tier settings)

@@ -43,13 +43,7 @@ from app.services import (
 )
 from ingest import sync_docs
 from tests.fakes import triage_output
-from tests.test_phase3_services import (  # noqa: F401  (tier fixtures)
-    directory_row,
-    escalated_telemetry,
-    resolved,
-    tier1,
-    tier2,
-)
+from tests.test_phase3_services import directory_row, escalated_telemetry, resolved
 from tests.test_phase3_services import ticket as thread_ticket
 
 

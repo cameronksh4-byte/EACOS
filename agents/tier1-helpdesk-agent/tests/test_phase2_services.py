@@ -28,7 +28,6 @@ from app.services import (
     pipeline,
     rag,
     signing,
-    supabase_client,
     telemetry,
     ticketing,
     vision,
