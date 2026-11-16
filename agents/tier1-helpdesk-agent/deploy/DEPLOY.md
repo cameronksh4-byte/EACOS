@@ -190,8 +190,8 @@ to prove the tunnel and the shared secret. Point the Slack app's *Interactivity*
 
 ## 8. Website free trial (your own deployment only)
 
-Lets visitors try the help desk on your company website: 5 free questions, then a free account,
-then paid plans and credit packs. It is off unless you turn it on, and it belongs on your own
+Lets visitors try the help desk on your company website: 5 free questions, then sign-up and a
+one-time 10-question trial, then credit packs ($20 for 50 questions) or a monthly plan ($79 or $149). It is off unless you turn it on, and it belongs on your own
 deployment, not a client's.
 
 1. In the env file, section 6: set `WEBCHAT_ENABLED=true`, a `WEBCHAT_SIGNING_SECRET`
@@ -205,9 +205,11 @@ deployment, not a client's.
 |---|---|---|
 | `WEBCHAT_VISITOR_FREE_USES` | 5 | Questions before sign-up is required |
 | `WEBCHAT_IP_DAILY_FREE_USES` | 15 | Anonymous questions per network per day (stops cookie-clearing) |
-| `WEBCHAT_PLAN_MONTHLY_LIMITS` | `{"free": 20, "starter": 250}` | Questions per month by plan. Add a plan here before selling it |
+| `WEBCHAT_SIGNUP_FREE_QUESTIONS` | 10 | One-time trial questions a new account gets after confirming its email |
+| `WEBCHAT_PLAN_MONTHLY_LIMITS` | `{"free": 0, "starter": 250, "pro": 600}` | Questions per month by plan (`starter` = $79, `pro` = $149). Add a plan here before selling it |
 | `WEBCHAT_MONTHLY_BUDGET_USD` | 10 | Hard cap on model spend for the whole website chat |
 
-Changing a number is an env-file edit and a re-deploy. When the budget is used up, visitors are told
+Prices are not settings here: the agent counts questions, and the website and payment provider hold
+the prices. Changing a number is an env-file edit and a re-deploy. When the budget is used up, visitors are told
 the assistant is unavailable and their question isn't counted. Plans and credits are set by the
 website's payment handler through `POST /v1/webchat/grants`; payments are not built yet.

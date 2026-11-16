@@ -70,8 +70,8 @@ There is no `/docs` or `/openapi.json`: a schema would list routes this deployme
 ## Website free trial
 
 Off by default. With `WEBCHAT_ENABLED=true`, the company website can offer the help desk to
-visitors: 5 free questions, then a free account (20 a month), then a paid plan with a monthly
-allowance and credit packs. The website's server signs every request; browsers never reach this
+visitors: 5 free questions, then sign-up and a one-time 10-question trial, then credit packs or
+a monthly plan with an allowance. The website's server signs every request; browsers never reach this
 API. Each question is counted in the database before any model call, answered from the chat's own
 tenant and SOPs in sandbox mode (no threads, outage detection, approvals or Tier 2 pages), and
 spends against its own hard monthly budget. Contract, reference website code and the hand-off

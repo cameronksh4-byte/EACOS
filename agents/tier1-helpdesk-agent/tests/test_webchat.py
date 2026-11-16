@@ -1,4 +1,4 @@
-"""Public website chat: 5 free questions, then sign-up; plan allowance, then credits.
+"""Public website chat: 5 free questions, sign-up, a 10-question trial, then credit packs or a monthly plan.
 
 The metering SQL itself is tested against real Postgres in supabase/tests/. Here
 the fake mirrors it, and the tests cover everything around it: who may call,
@@ -51,7 +51,7 @@ async def test_five_free_questions_then_sign_up_is_required(chat):
     calls_before = len(chat["claude"].requests)
     reply = await webchat.handle_message(ask())
     assert reply.status == "signup_required" and reply.signup_url.endswith("/helpdesk/signup")
-    assert "5 free questions" in reply.reply and "20 questions a month" in reply.reply
+    assert "5 free questions" in reply.reply and "10 more free questions" in reply.reply
     assert len(chat["claude"].requests) == calls_before  # the sixth question never reaches the model
 
 
@@ -64,8 +64,42 @@ async def test_new_cookie_from_the_same_network_does_not_restart_the_trial(chat,
     assert (await webchat.handle_message(ask(visitor_id="visitor-brand-new-00001"))).status == "signup_required"
 
 
-async def test_signed_up_free_plan_then_credits_then_limit(chat, monkeypatch):
+async def test_default_pricing_flow_trial_then_credit_pack_then_monthly_plans(chat):
+    """5 anonymous questions, sign up, 10 trial questions, then a 50-question pack or a plan."""
+    me = {"account_email": "pat@example.com"}
+    for n in range(1, 11):
+        reply = await webchat.handle_message(ask(**me))
+        assert reply.status == "answered" and reply.plan == "free" and reply.remaining == 10 - n
+    asked = len(chat["claude"].requests)
+    blocked = await webchat.handle_message(ask(**me))
+    assert blocked.status == "limit_reached" and "free trial questions" in blocked.reply
+    assert "credit pack" in blocked.reply and "monthly plan" in blocked.reply
+    assert len(chat["claude"].requests) == asked  # question 11 never reaches the model
+
+    # A $20 pack is 50 questions (the price lives on the website; the agent counts questions).
+    await webchat.apply_grant(WebChatGrant(grant_id="pay_pack_0001", email="pat@example.com", add_credits=50))
+    after_pack = await webchat.handle_message(ask(**me))
+    assert after_pack.status == "answered" and after_pack.remaining == 49
+
+    # The two paid tiers: a monthly allowance, with unused credits kept on top.
+    await webchat.apply_grant(WebChatGrant(grant_id="pay_sub_0001", email="pat@example.com", plan="starter"))
+    starter = await webchat.handle_message(ask(**me))
+    assert (starter.plan, starter.allowance, starter.used, starter.credits) == ("starter", 250, 1, 49)
+    assert starter.remaining == 249 + 49
+    await webchat.apply_grant(WebChatGrant(grant_id="pay_sub_0002", email="pat@example.com", plan="pro"))
+    assert (await webchat.handle_message(ask(**me))).allowance == 600
+
+
+async def test_the_trial_is_granted_once_even_if_the_first_thing_they_do_is_pay(chat):
+    grant = WebChatGrant(grant_id="pay_first_0001", email="buyer@example.com", add_credits=50)
+    assert (await webchat.apply_grant(grant))["credits"] == 60  # 10 trial + 50 bought
+    await webchat.apply_grant(WebChatGrant(grant_id="pay_first_0002", email="buyer@example.com", add_credits=50))
+    assert chat["sb"].webchat_accounts["buyer@example.com"]["credits"] == 110  # no second trial
+
+
+async def test_monthly_allowance_then_credits_then_limit(chat, monkeypatch):
     monkeypatch.setenv("WEBCHAT_PLAN_MONTHLY_LIMITS", json.dumps({"free": 2, "starter": 4}))
+    monkeypatch.setenv("WEBCHAT_SIGNUP_FREE_QUESTIONS", "0")
     get_settings.cache_clear()
     me = {"account_email": "Pat@Example.com"}
     first = await webchat.handle_message(ask(**me))
@@ -235,7 +269,7 @@ def test_grants_and_account_lookup_over_http(chat):
     with TestClient(main.app) as client:
         r = signed(client, "/v1/webchat/grants", {"grant_id": "pay_http_0001", "email": "Pat@Example.com",
                                                   "plan": "starter", "add_credits": 100})
-        assert r.status_code == 200 and r.json() == {"applied": True, "plan": "starter", "credits": 100}
+        assert r.status_code == 200 and r.json() == {"applied": True, "plan": "starter", "credits": 110}  # + trial
         assert signed(client, "/v1/webchat/grants", {"grant_id": "pay_http_0002", "email": "pat@example.com",
                                                      "plan": "platinum"}).status_code == 422
         assert client.post("/v1/webchat/grants", json={"grant_id": "pay_evil_0001", "email": "eve@example.com",

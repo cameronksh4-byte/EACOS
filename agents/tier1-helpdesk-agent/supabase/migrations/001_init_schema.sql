@@ -942,16 +942,21 @@ create table if not exists public.webchat_grants (
     created_at  timestamptz not null default now()
 );
 
+-- A new account starts with p_signup_credits questions: the one-time free trial.
+-- They are ordinary credits (never expire, spent after any monthly allowance),
+-- and are granted only when the account row is first created.
 -- Count one question, or say why not. p_plan_limits maps plan -> questions per
 -- calendar month (UTC), e.g. {"free": 20, "starter": 250}; an unknown plan gets 0.
 -- charged: 'trial' | 'allowance' | 'credit' (what to give back if the answer fails).
+drop function if exists public.webchat_consume(text, text, text, int, int, jsonb);
 create or replace function public.webchat_consume(
     p_visitor_id     text,
     p_ip_hash        text,
     p_account_email  text,
     p_visitor_limit  int,
     p_ip_daily_limit int,
-    p_plan_limits    jsonb
+    p_plan_limits    jsonb,
+    p_signup_credits int default 0
 )
 returns table (allowed boolean, reason text, charged text, plan text, used int, allowance int, credits int)
 language plpgsql
@@ -967,7 +972,9 @@ declare
     v_ip     int;
 begin
     if p_account_email is not null then
-        insert into public.webchat_accounts (email) values (lower(p_account_email)) on conflict do nothing;
+        insert into public.webchat_accounts (email, credits)
+        values (lower(p_account_email), least(greatest(coalesce(p_signup_credits, 0), 0), 100000))
+        on conflict do nothing;
         select * into v_acct from public.webchat_accounts a where a.email = lower(p_account_email) for update;
         if v_acct.period_start < v_month then
             update public.webchat_accounts a set period_start = v_month, period_uses = 0
@@ -1032,11 +1039,13 @@ end;
 $$;
 
 -- Apply a plan change and/or a credit purchase exactly once per p_grant_id.
+drop function if exists public.webchat_apply_grant(text, text, text, int);
 create or replace function public.webchat_apply_grant(
-    p_grant_id    text,
-    p_email       text,
-    p_plan        text default null,
-    p_add_credits int  default 0
+    p_grant_id       text,
+    p_email          text,
+    p_plan           text default null,
+    p_add_credits    int  default 0,
+    p_signup_credits int  default 0   -- someone who pays before asking anything still gets the trial
 )
 returns table (applied boolean, plan text, credits int)
 language plpgsql
@@ -1056,7 +1065,9 @@ begin
         returning 1
     )
     select exists (select 1 from ins) into v_new;
-    insert into public.webchat_accounts (email) values (lower(p_email)) on conflict do nothing;
+    insert into public.webchat_accounts (email, credits)
+    values (lower(p_email), least(greatest(coalesce(p_signup_credits, 0), 0), 100000))
+    on conflict do nothing;
     if v_new then
         update public.webchat_accounts a
            set plan = coalesce(p_plan, a.plan),

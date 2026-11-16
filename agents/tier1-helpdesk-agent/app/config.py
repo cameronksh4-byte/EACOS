@@ -247,9 +247,13 @@ class Settings(BaseSettings):
     webchat_tenant_id: str = Field("web-demo", pattern=r"^[a-z0-9-]{2,64}$")  # its own SOPs and budget
     webchat_signing_secret: SecretStr = SecretStr("")
     webchat_visitor_free_uses: int = Field(5, ge=0, le=100)  # questions before sign-up is required
+    # One-time free trial granted when an account is created (after email verification).
+    webchat_signup_free_questions: int = Field(10, ge=0, le=1000)
     webchat_ip_daily_free_uses: int = Field(15, ge=1, le=10000)  # anonymous questions per network per day
-    # Questions per calendar month by plan. Beyond it, purchased credits are spent.
-    webchat_plan_monthly_limits: dict[str, int] = {"free": 20, "starter": 250}
+    # Questions per calendar month by plan. Beyond it, credits are spent (trial
+    # questions and purchased packs). "free" has no monthly allowance: after the
+    # trial a person buys a credit pack or a monthly plan. Prices live on the website.
+    webchat_plan_monthly_limits: dict[str, int] = {"free": 0, "starter": 250, "pro": 600}
     webchat_monthly_budget_usd: float = Field(10.0, ge=0)  # hard model-spend cap for the whole website chat
     webchat_max_message_chars: int = Field(1000, ge=50, le=4000)
     webchat_signup_url: str = ""

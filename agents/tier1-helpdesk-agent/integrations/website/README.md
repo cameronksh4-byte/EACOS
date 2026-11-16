@@ -2,16 +2,18 @@
 
 Lets visitors use the help desk on the company website:
 
-| Who | What they get | Then |
-|---|---|---|
-| Visitor, no sign-up | 5 questions in total | must sign up |
-| Free account (verified email) | 20 questions a month | upgrade or buy credits |
-| Starter, $29/month | 250 questions a month | buy credits or move up a tier |
-| Credit pack | extra questions, used after the monthly allowance, never expire | |
+| Who | Price | What they get | Then |
+|---|---|---|---|
+| Visitor, no sign-up | free | 5 questions in total | must sign up |
+| New account (verified email) | free | a one-time 10-question trial | buy a credit pack or a plan |
+| Credit pack | $20 | 50 questions; never expire; used after any monthly allowance | |
+| Starter (`starter`) | $79/month | 250 questions a month | buy credits or move up |
+| Pro (`pro`) | $149/month | 600 questions a month | buy credits |
 
-Every number above is a setting on the agent (`WEBCHAT_VISITOR_FREE_USES`,
-`WEBCHAT_PLAN_MONTHLY_LIMITS`), not code. Prices live on the website and in the payment
-provider; the agent only knows plan names and question counts.
+The question counts are settings on the agent (`WEBCHAT_VISITOR_FREE_USES`,
+`WEBCHAT_SIGNUP_FREE_QUESTIONS`, `WEBCHAT_PLAN_MONTHLY_LIMITS`), not code. Prices live on the
+website and in the payment provider; the agent only knows plan names and question counts. The
+monthly allowances for Starter and Pro are placeholders until the owner confirms them.
 
 ## How it fits together
 
@@ -86,13 +88,14 @@ Answer object:
   "reply": "1. Disconnect and reconnect…",   // PLAIN TEXT. Insert with textContent, never innerHTML
   "cited_sop_ids": ["SOP-NET-001"],
   "signed_in": false, "plan": null,
-  "used": 1, "allowance": 5, "remaining": 4, "credits": 0,
+  "used": 1, "allowance": 5, "remaining": 4, "credits": 0,   // remaining = allowance left + credits
   "signup_url": null, "upgrade_url": null
 }
 ```
 
 - `signup_required`: show the sign-up form. `reply` already explains why.
-- `limit_reached`: link to `upgrade_url`. `reply` offers credits or the next plan.
+- `limit_reached`: link to `upgrade_url`. `reply` offers a credit pack or a monthly plan (it words
+  the end of the free trial differently from a used-up monthly allowance).
 - `unavailable`: the question was not counted. Let them try again.
 
 ## Agent API (called only by the website's server)
@@ -115,7 +118,7 @@ server once payment is confirmed:
 ```js
 import handler from "./api-helpdesk.mjs";
 await handler.grant({ grant_id: "<the payment's own ID>", email, plan: "starter" });       // subscription started
-await handler.grant({ grant_id: "<the payment's own ID>", email, add_credits: 100 });      // credit pack bought
+await handler.grant({ grant_id: "<the payment's own ID>", email, add_credits: 50 });       // $20 credit pack bought
 await handler.grant({ grant_id: "<cancellation event ID>", email, plan: "free" });         // subscription ended
 ```
 

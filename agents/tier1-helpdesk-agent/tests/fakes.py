@@ -213,7 +213,8 @@ class FakeSupabase:
     def _webchat(self, fn, p):
         """Mirrors webchat_consume / webchat_refund / webchat_apply_grant (tested for real in supabase/tests)."""
         email = (p.get("p_account_email") or p.get("p_email") or "").lower() or None
-        acct = self.webchat_accounts.setdefault(email, {"plan": "free", "credits": 0, "period_uses": 0}) if email else None
+        acct = self.webchat_accounts.setdefault(
+            email, {"plan": "free", "credits": int(p.get("p_signup_credits") or 0), "period_uses": 0}) if email else None
         if fn == "webchat_consume":
             if acct is not None:
                 limit = int(p["p_plan_limits"].get(acct["plan"], 0))

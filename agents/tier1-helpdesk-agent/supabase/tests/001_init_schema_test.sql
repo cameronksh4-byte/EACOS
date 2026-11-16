@@ -375,6 +375,20 @@ begin
     update webchat_accounts set plan = 'mystery', credits = 0 where email = 'pat@example.com';
     select * into r from webchat_consume(v, ip, 'pat@example.com', 5, 15, limits);
     assert not r.allowed and r.reason = 'plan_limit', 'unknown plan was given an allowance';
+
+    -- One-time free trial: a new account starts with the sign-up questions, once.
+    select * into r from webchat_consume(v, ip, 'new@example.com', 5, 15, '{"free": 0}', 10);
+    assert r.allowed and r.charged = 'credit' and r.credits = 9 and r.allowance = 0, 'trial questions not granted';
+    for i in 1..9 loop
+        perform webchat_consume(v, ip, 'new@example.com', 5, 15, '{"free": 0}', 10);
+    end loop;
+    select * into r from webchat_consume(v, ip, 'new@example.com', 5, 15, '{"free": 0}', 10);
+    assert not r.allowed and r.reason = 'plan_limit', 'the trial was granted a second time';
+    -- Paying before asking anything keeps the trial questions on top of the purchase.
+    select * into r from webchat_apply_grant('pay_0003', 'buyer@example.com', null, 50, 10);
+    assert r.applied and r.credits = 60, format('expected 60 credits, got %s', r.credits);
+    select * into r from webchat_apply_grant('pay_0004', 'buyer@example.com', 'starter', 0, 10);
+    assert r.credits = 60, 'the trial was granted again on a later payment';
 end $$;
 
 -- The website tables are service-role only.

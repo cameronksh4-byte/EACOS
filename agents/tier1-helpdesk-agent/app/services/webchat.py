@@ -12,8 +12,10 @@ Metering happens in the database, atomically, before any model call:
     anonymous visitor   WEBCHAT_VISITOR_FREE_USES questions in total (default 5),
                         and a per-network daily cap so clearing cookies doesn't
                         reset the trial. After that: sign up.
-    signed-up account   a monthly allowance by plan (free, starter, ...), then
-                        purchased credits. After that: buy credits or upgrade.
+    new account         WEBCHAT_SIGNUP_FREE_QUESTIONS more, once (default 10):
+                        the free trial. Granted as credits when the account is created.
+    paid plan           a monthly allowance by plan (starter, pro, ...), then
+                        credits (credit packs). After that: buy credits or upgrade.
 
 The answer comes from the normal pipeline in sandbox mode: grounded in the
 website tenant's SOPs, same guardrails, but no side effects (nobody is paged,
@@ -90,9 +92,11 @@ def clean_message(text: str, settings: Settings) -> str:
 
 
 def _counters(row: dict[str, Any]) -> dict[str, Any]:
+    """`remaining` is every question the person can still ask: allowance left plus credits."""
     used, allowance = int(row.get("used") or 0), int(row.get("allowance") or 0)
+    credits = int(row.get("credits") or 0)
     return {"plan": row.get("plan"), "used": used, "allowance": allowance,
-            "remaining": max(0, allowance - used), "credits": int(row.get("credits") or 0)}
+            "remaining": max(0, allowance - used) + credits, "credits": credits}
 
 
 def signup_required(settings: Settings, row: dict[str, Any]) -> WebChatResponse:
@@ -100,8 +104,8 @@ def signup_required(settings: Settings, row: dict[str, Any]) -> WebChatResponse:
         status="signup_required",
         reply=(
             f"You've used your {settings.webchat_visitor_free_uses} free questions. "
-            "Create a free account to keep going. It takes a minute, and the free plan includes "
-            f"{settings.webchat_plan_monthly_limits.get('free', 0)} questions a month."
+            "Create a free account to keep going. It takes a minute, and you get "
+            f"{settings.webchat_signup_free_questions} more free questions to try it properly."
         ),
         signup_url=settings.webchat_signup_url or None,
         **_counters(row),
@@ -109,13 +113,16 @@ def signup_required(settings: Settings, row: dict[str, Any]) -> WebChatResponse:
 
 
 def limit_reached(settings: Settings, row: dict[str, Any]) -> WebChatResponse:
+    if int(settings.webchat_plan_monthly_limits.get(str(row.get("plan")), 0)) <= 0:
+        reply = ("You've used all your free trial questions. To keep going, add questions with a credit "
+                 "pack or choose a monthly plan.")
+    else:
+        reply = ("You've used all the questions included in your plan this month. "
+                 "You can add more questions with a credit pack, or move up a plan for a larger monthly allowance.")
     return WebChatResponse(
         status="limit_reached",
         signed_in=True,
-        reply=(
-            "You've used all the questions included in your plan this month. "
-            "You can add more questions with a credit pack, or move up a plan for a larger monthly allowance."
-        ),
+        reply=reply,
         upgrade_url=settings.webchat_upgrade_url or None,
         **_counters(row),
     )
@@ -181,6 +188,7 @@ async def handle_message(request: WebChatRequest) -> WebChatResponse:
             "p_visitor_limit": settings.webchat_visitor_free_uses,
             "p_ip_daily_limit": settings.webchat_ip_daily_free_uses,
             "p_plan_limits": settings.webchat_plan_monthly_limits,
+            "p_signup_credits": settings.webchat_signup_free_questions,
         })
         row = rows[0] if isinstance(rows, list) else rows
         if not isinstance(row, dict):
@@ -232,6 +240,7 @@ async def apply_grant(grant: WebChatGrant) -> dict[str, Any]:
     rows = await supabase_client.rpc("webchat_apply_grant", {
         "p_grant_id": grant.grant_id, "p_email": grant.email, "p_plan": grant.plan,
         "p_add_credits": grant.add_credits,
+        "p_signup_credits": settings.webchat_signup_free_questions,
     })
     row = rows[0] if isinstance(rows, list) else rows
     logger.info("webchat grant id=%s applied=%s plan=%s credits_added=%d",

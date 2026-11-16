@@ -8,6 +8,7 @@
   var T = window.HELPDESK_TEXT || {
     placeholder: "Describe your IT problem…", send: "Send", thinking: "Looking that up…",
     left: function (n) { return n + (n === 1 ? " free question left" : " free questions left"); },
+    leftAccount: function (n) { return n + (n === 1 ? " question left" : " questions left"); },
     signupTitle: "Create a free account to keep going", email: "Work email", name: "Your name",
     signupSend: "Email me a sign-in link", signupSent: "Check your inbox for the link. It works for 20 minutes.",
     upgrade: "See plans and credit packs", error: "Something went wrong. Please try again.",
@@ -40,8 +41,9 @@
       body: JSON.stringify(body) }).then(function (r) { return r.json(); });
   }
   function showMeter(d) {
-    if (d.signed_in) meter.textContent = (d.used || 0) + " / " + (d.allowance || 0) + (d.credits ? " + " + d.credits : "");
-    else if (typeof d.remaining === "number") meter.textContent = T.left(d.remaining);
+    var left = typeof d.remaining === "number" ? d.remaining
+      : Math.max(0, (d.allowance || 0) - (d.used || 0)) + (d.credits || 0); // /me has no "remaining"
+    meter.textContent = d.signed_in ? T.leftAccount(left) : T.left(left);
   }
   function showSignup() {
     extra.replaceChildren();
