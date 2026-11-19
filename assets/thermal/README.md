@@ -5,73 +5,83 @@ website may show. Each image the site uses must have a row in
 [`MANIFEST.md`](MANIFEST.md). If an image has no row, or its row still says
 `PENDING`, the site must not use it.
 
+**This is a portable staging folder.** It sits at the root of the EACOS repo
+for now, but EACOS is *not* confirmed as the Valley Drone Works site and is not
+the live site. When the real site repo is confirmed, the whole folder moves
+there as one unit. Nothing in it depends on EACOS.
+
 ## Folder layout
 
 ```
 assets/thermal/
 ├── README.md          ← this file (labeling rules)
 ├── MANIFEST.md        ← one row per slot: file, source type, caption, alt, pages, consent
-├── process.py         ← makes web copies and checks the folder against the rules
+├── process.py         ← imports supplied files, makes web copies, checks the rules
 ├── originals/         ← untouched originals, byte-for-byte as supplied. Never edit these.
+│   └── pair-original.jpg   (source of the pair-visible / pair-thermal panels)
 └── *.jpg              ← web copies: max 1920 px wide, under 400 KB each
 ```
 
 ## Labeling rules
 
 Every image is one of three source types. The source type sets how the image
-is captioned and where it may appear.
+is captioned and where it may appear. Captions are fixed. Use them exactly as
+written and never paraphrase them.
 
 ### DESIGN ARTWORK
-- Its caption must say that it is **illustrative artwork**. The exact wording
-  for each image is written in the manifest by the site owner.
-- It is **never** used inside a report, a sample report or a sample finding,
-  and never presented as an inspection result.
+- Always captioned exactly:
+  **`Illustrative artwork — not a thermal scan of a real property.`**
+- **Never** used inside a report or a sample finding. The Sample Packet
+  counts as a report, so no DESIGN ARTWORK goes inside it. That includes its
+  cover and its findings spreads.
 
 ### TRAINING DATA
-- It is always captioned exactly:
-  **`Training - sample data, not a client site`**
-- That caption is never shortened, reworded or left out.
+- Always captioned exactly:
+  **`Training — sample data, not a client site.`**
 
 ### CLIENT JOB
-- It may be used **only** with a written consent reference. That reference
-  must be recorded in the manifest's `Consent ref` column.
+- Used **only** with a written consent reference. That reference must be
+  recorded in the manifest's `Consent ref` column.
 - An image is marked CLIENT JOB only when the site owner supplies the consent
-  reference. Without one it is not marked CLIENT JOB and is not published.
-- Its web copy has its metadata (including GPS location) removed by
-  `process.py`. The original in `originals/` keeps it.
+  reference.
+- **This library currently has no CLIENT JOB images and no consent
+  references.** No row may be marked CLIENT JOB.
+
+### Findings spreads (Sample Packet)
+Findings spreads use clearly drawn example markups labeled as examples. They
+never use DESIGN ARTWORK photos.
 
 ## Sourcing rules
 
 - Use only image files the site owner supplies. No stock imagery, and no
   generated or replacement imagery.
-- Captions are never invented. A caption is either the fixed TRAINING DATA
-  caption or wording the owner supplied. Until then it reads `PENDING`.
-- An image's source type is never guessed from how it looks.
+- Captions are never invented. Only the two fixed captions above are used.
+- An image's source type is never guessed from how it looks. It comes from
+  the owner.
 
 ## Web copies
 
-- Max **1920 px wide** and under **400 KB** each, saved as JPEG.
+- Max **1920 px wide** and under **400 KB** each, saved as JPEG with metadata
+  (including GPS) removed. Originals keep their metadata.
 - Images are scaled, never cropped. **Thermal images are never cropped**,
   never recoloured and never re-paletted. Only their size changes.
   Images are never enlarged.
-- The two `vt-pair-*` files are a matched pair. Their originals must have the
-  same aspect ratio, and their web copies come out the same size so the two
-  line up exactly.
-- Web copies are viewing images only. Any temperature (radiometric) data in a
-  thermal original is lost in the web copy. Measurements come from
-  `originals/` only.
+- `pair-visible.jpg` and `pair-thermal.jpg` are a matched pair for the Roof
+  Scan slider. Their web copies come out the same size so the two line up.
+- Web copies are viewing images only. Measurements come from `originals/`
+  only.
 
-## Adding an image
+## Workflow
 
 ```bash
-# 1. Make the original + web copy for a slot (refuses to overwrite an existing original)
-python3 assets/thermal/process.py add hero-roof /path/to/supplied/file.jpg
+# 1. Copy the supplied folder in. Every supplied file is stored untouched in originals/.
+python3 assets/thermal/process.py import path/to/valley-drone-works/assets-thermal
 
-# 2. Fill in that slot's row in MANIFEST.md (source type, caption, alt, pages, consent ref)
+# 2. Fill in alt text in MANIFEST.md, then set Status to Ready
 
-# 3. Check the folder against the rules
+# 3. Check the folder against the rules (run again after any change)
 python3 assets/thermal/process.py check
 ```
 
-Slots: `hero-roof`, `roof-detail`, `vt-pair-visible`, `vt-pair-thermal`,
-`solar-array`, `texture-band`, `packet-cover`.
+To rebuild web copies from `originals/` (for example after moving the folder),
+run `python3 assets/thermal/process.py build`.
