@@ -162,15 +162,28 @@ def cmd_import(folder):
     print("Next: fill in alt text in MANIFEST.md, then run: process.py check")
 
 
-def manifest_rows():
-    rows = {}
-    keys = ["slot", "file", "original", "source", "caption", "alt", "pages",
-            "consent", "status"]
+KEYS = ["slot", "file", "original", "source", "caption", "alt", "pages",
+        "consent", "status"]
+
+
+def manifest_table():
+    """Every data row of the image table, in order (duplicates kept)."""
+    out = []
     for line in MANIFEST.read_text(encoding="utf-8").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) == len(keys) and cells[0] in SLOTS:
-            rows[cells[0]] = dict(zip(keys, cells))
-    return rows
+        if (len(cells) == len(KEYS) and cells[0] not in ("Slot", "")
+                and not set(cells[0]) <= set("-: ")):
+            out.append(dict(zip(KEYS, cells)))
+    return out
+
+
+def manifest_rows():
+    return {r["slot"]: r for r in manifest_table() if r["slot"] in SLOTS}
+
+
+def aspect_matches(a, b, tol=ASPECT_TOLERANCE):
+    ra, rb = a[0] / a[1], b[0] / b[1]
+    return abs(ra - rb) / ra <= tol
 
 
 def blank(v):
@@ -179,10 +192,57 @@ def blank(v):
 
 def cmd_check():
     errors, warnings, notes = [], [], []
+    table = manifest_table()
     rows = manifest_rows()
     for slot in SLOTS:
         if slot not in rows:
             errors.append(f"{slot}: no row in MANIFEST.md")
+    # Every image file outside originals/ has exactly one manifest row.
+    named = [r["file"].strip("`") for r in table]
+    for r in table:
+        if r["slot"] not in SLOTS:
+            errors.append(f"manifest row for unknown slot '{r['slot']}'")
+    for name in sorted(set(n for n in named if named.count(n) > 1)):
+        errors.append(f"{name}: appears in {named.count(name)} manifest rows (must be exactly one)")
+    for p in sorted(HERE.iterdir()):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() in IMAGE_EXT:
+            if named.count(p.name) != 1:
+                errors.append(f"{p.name}: has {named.count(p.name)} manifest rows (must be exactly one)")
+        else:
+            notes.append(f"{p.name}: not an image, so needs no manifest row")
+    # Every row names a source type and a caption.
+    for r in table:
+        for key, label in (("source", "source type"), ("caption", "caption")):
+            if blank(r[key]):
+                errors.append(f"{r['slot']}: row does not name a {label}")
+    # No image is cropped compared with its original (shape must match).
+    for slot, name in SLOTS.items():
+        web, orig = HERE / name, ORIGINALS / name
+        if web.exists() and orig.exists():
+            ws, os_ = Image.open(web).size, ImageOps.exif_transpose(Image.open(orig)).size
+            if not aspect_matches(ws, os_):
+                errors.append(f"{slot}: web copy {ws} has a different shape from original "
+                              f"{os_} — cropped or distorted")
+    pair_src = ORIGINALS / EXTRA_ORIGINALS[0]
+    panels = [ORIGINALS / SLOTS[s] for s in PAIR]
+    if pair_src.exists() and all(p.exists() for p in panels):
+        sw, sh = Image.open(pair_src).size
+        (lw, lh), (rw, rh) = (Image.open(p).size for p in panels)
+        if lh != sh or rh != sh:
+            errors.append(f"pair: panel heights ({lh}, {rh}) differ from pair-original "
+                          f"height ({sh}) — panels were cropped top or bottom")
+        gap = sw - lw - rw
+        if gap < 0:
+            errors.append(f"pair: panels are wider together ({lw}+{rw}) than pair-original ({sw})")
+        elif gap > sw * 0.02:
+            errors.append(f"pair: {gap}px of pair-original is in neither panel — "
+                          "more than a centre divider; possible crop")
+        else:
+            notes.append(f"pair: panels cover pair-original except a {gap}px centre divider")
+    elif not pair_src.exists():
+        notes.append("pair: pair-original.jpg not supplied yet, so the panel split can't be checked")
     for slot, r in rows.items():
         name = SLOTS[slot]
         source = r["source"].strip("`")
