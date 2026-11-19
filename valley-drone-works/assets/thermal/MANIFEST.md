@@ -24,23 +24,28 @@ may be marked CLIENT JOB.
 ## Received originals — not yet assigned to a slot
 
 Supplied by the owner on 2026-11-19 and stored byte-for-byte in `originals/`.
-None of them is used on the site until the owner assigns it to a slot. The
+The slot column is a **proposal** the owner asked for. Nothing is used on the
+site until the owner approves it. The
 descriptions below only identify each file. They are not captions, alt
 text or source types.
 
 | Original | Size | SHA-256 | What it shows (identification only) | Assigned slot |
 |---|---|---|---|---|
-| `originals/supplied-01.webp` | 2000×1328 | `9994b5e7a6c5b4ed8f09f767948fb430c211147d76815f95a918fe1506b049f6` | Angled thermal view of a flat roof, round vent top-left, red hotspot in centre | Unassigned |
-| `originals/supplied-02.webp` | 2000×1342 | `929eb1b03558c461ad633e67a9e546a51ca2e84f8ec67c43971b433a40beb9d8` | Straight-down thermal view of a roof with 8 HVAC units, hotspots near the right-hand units | Unassigned |
-| `originals/supplied-03.webp` | 2000×1493 | `5ba2a0de00bcdcf5b4c79eb213c434b0ef3bbc28e58957586e592aa3d741e03f` | Angled thermal view of a flat roof, square vent top-left, large red hotspot | Unassigned |
-| `originals/supplied-04.webp` | 2000×1125 | `ceccd3feb6a70337f6ac27cc6c2ccfd7f5453760a41f4ff38509deb795b76dca` | Drone flying at dusk over a large roof shown in thermal colours | Unassigned |
-| `originals/supplied-05.webp` | 2000×1342 | `bb8fe6f9ae0957eeeeca2ff354af525934ebe418dc26d3d56dc0bc1362909870` | Same straight-down roof as 02, hotspots along the middle seam and the lower-centre unit | Unassigned |
-| *(not stored — file not received)* | — | — | Visible-light, straight-down photo of the same roof as 02 and 05 (8 HVAC units, 2 skylights, parking bay bottom-right). Shown in chat but no file reached the workspace. | Unassigned |
+| `originals/supplied-01.webp` | 2000×1328 | `9994b5e7a6c5b4ed8f09f767948fb430c211147d76815f95a918fe1506b049f6` | Angled thermal view of a flat roof, round vent top-left, red hotspot in centre | **Proposed:** roof-detail + texture-band — awaiting approval |
+| `originals/supplied-02.webp` | 2000×1342 | `929eb1b03558c461ad633e67a9e546a51ca2e84f8ec67c43971b433a40beb9d8` | Straight-down thermal view of a roof with 8 HVAC units, hotspots near the right-hand units | Spare (alternative pair-thermal) |
+| `originals/supplied-03.webp` | 2000×1493 | `5ba2a0de00bcdcf5b4c79eb213c434b0ef3bbc28e58957586e592aa3d741e03f` | Angled thermal view of a flat roof, square vent top-left, large red hotspot | Spare (alternative roof-detail) |
+| `originals/supplied-04.webp` | 2000×1125 | `ceccd3feb6a70337f6ac27cc6c2ccfd7f5453760a41f4ff38509deb795b76dca` | Drone flying at dusk over a large roof shown in thermal colours | **Proposed:** hero-roof — awaiting approval |
+| `originals/supplied-05.webp` | 2000×1342 | `bb8fe6f9ae0957eeeeca2ff354af525934ebe418dc26d3d56dc0bc1362909870` | Same straight-down roof as 02, hotspots along the middle seam and the lower-centre unit | **Proposed:** pair-thermal — awaiting approval |
+| `originals/supplied-06.webp` | 2000×1328 | `bda68efce6b981db435dea92d389ee9a82855d442066882ebbb531d611d75239` | Straight-down thermal view of the same roof as 02/05, evenly warm units and roof edges, no single hotspot. Same scene but not pixel-aligned with 02/05 (14 px shorter, slightly offset) | Spare |
+| `originals/supplied-07.webp` | 2000×1328 | `91f721b7443152e8018be597af61f1754d92904cc07fbbca7d95a8b372df4936` | Drone at dusk over the same 8-unit roof seen at an angle, large red-orange warm area lower-left | Spare (alternative hero-roof) |
+| `originals/supplied-08.webp` | 2000×1131 | `2d311d6271b8eb03230254cc6cff30f183f87b359d25a73d5cb4e58da7e0d84a` | Drone at dusk over a large roof with rows of solar panels, warm cells on several panels; same sky/drone frame as 04 | **Proposed:** solar-array — awaiting approval |
+| *(not stored — file not received)* | — | — | Visible-light, straight-down photo of the same roof as 02 and 05 (8 HVAC units, 2 skylights, parking bay bottom-right). Shown in chat but no file reached the workspace. | **Proposed:** pair-visible — awaiting approval and the file |
 
 Gaps against the slots: the only **visible-light** photo (same view as 02/05)
 was shown in chat, but its file has not been received. None of the files is a
-split `pair-original.jpg`, and none shows a **solar array**. The owner hasn't
-said which, if any, is **TRAINING DATA**.
+split `pair-original.jpg`. No file is wide enough for **texture-band** without
+cropping or extending it. The owner hasn't said which, if any, is
+**TRAINING DATA**, so **packet-cover** has no proposal.
 
 ## Slot notes
 
@@ -81,3 +86,4 @@ said which, if any, is **TRAINING DATA**.
 | 2026-11-19 | all | Manifest created; all slots awaiting supplied images | — |
 | 2026-11-19 | all | Source types, fixed captions, allowed pages and consent (N/A) recorded from owner's instructions; pair slots renamed to `pair-visible` / `pair-thermal`; no CLIENT JOB rows | owner |
 | 2026-11-19 | — | Five supplied WebP originals stored untouched in `originals/` as `supplied-01…05.webp`; not yet assigned to slots | owner |
+| 2026-11-19 | — | Supplied originals 06–08 stored untouched; slot mapping proposed for owner approval (not applied) | owner |
