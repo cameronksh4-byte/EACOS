@@ -12,6 +12,7 @@ same size. Needs Pillow. Paths are relative to this file, so the folder can be
 moved as one unit.
 """
 import hashlib
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ SLOTS = {
     "packet-cover": "packet-cover.jpg",
 }
 PAIR = ("pair-visible", "pair-thermal")
-EXTRA_ORIGINALS = ["pair-original.jpg"]  # kept untouched, no web copy
+EXTRA_ORIGINALS = ["pair-original.jpg"]  # import keeps it untouched if supplied
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 
 MAX_WIDTH = 1920
@@ -91,15 +92,32 @@ def write_web(src, dst, width, size=None):
         width = int(width * 0.9)  # shrink the whole frame; never crop
 
 
+def original_of(slot, rows=None):
+    """The original a slot's web copy is made from: the first `originals/...`
+    path in that slot's Original column in MANIFEST.md (the manifest is the
+    source of truth). None if the row names no original or the file is missing."""
+    r = (rows or manifest_rows()).get(slot)
+    m = re.search(r"`(originals/[^`]+)`", r["original"]) if r else None
+    p = HERE / m.group(1) if m else None
+    return p if p and p.is_file() else None
+
+
 def build():
-    missing = [f for f in SLOTS.values() if not (ORIGINALS / f).exists()]
+    rows = manifest_rows()
     for slot, name in SLOTS.items():
-        if slot in PAIR or name in missing:
+        src = original_of(slot, rows)
+        if slot in PAIR:
             continue
-        w = write_web(ORIGINALS / name, HERE / name, MAX_WIDTH)
-        print(f"{slot}: {name} ({w}px wide, {(HERE / name).stat().st_size} bytes)")
-    a, b = (ORIGINALS / SLOTS[s] for s in PAIR)
-    if a.exists() and b.exists():
+        if not src:
+            print(f"{slot}: no original yet (no web copy made)")
+            continue
+        w = write_web(src, HERE / name, MAX_WIDTH)
+        print(f"{slot}: {src.name} -> {name} ({w}px wide, {(HERE / name).stat().st_size} bytes)")
+    a, b = (original_of(s, rows) for s in PAIR)
+    if not (a and b):
+        print("pair: both originals needed before the matched pair is made "
+              f"(have: {', '.join(s for s, p in zip(PAIR, (a, b)) if p) or 'neither'})")
+    else:
         (ia, _), (ib, _) = load(a), load(b)
         ra, rb = ia.width / ia.height, ib.width / ib.height
         if abs(ra - rb) / ra > ASPECT_TOLERANCE:
@@ -108,14 +126,12 @@ def build():
         width = min(ia.width, ib.width, MAX_WIDTH)
         while True:
             size = (width, round(min(ia.height / ia.width, ib.height / ib.width) * width))
-            wa = write_web(a, HERE / a.name, width, size)
-            wb = write_web(b, HERE / b.name, width, size)
+            wa = write_web(a, HERE / SLOTS[PAIR[0]], width, size)
+            wb = write_web(b, HERE / SLOTS[PAIR[1]], width, size)
             if wa == wb == width:
                 break
             width = min(wa, wb)
         print(f"pair: {a.name} + {b.name} ({size[0]}x{size[1]} each)")
-    for name in missing:
-        print(f"missing original: originals/{name} (no web copy made)")
 
 
 def store(src, name):
@@ -219,30 +235,15 @@ def cmd_check():
                 errors.append(f"{r['slot']}: row does not name a {label}")
     # No image is cropped compared with its original (shape must match).
     for slot, name in SLOTS.items():
-        web, orig = HERE / name, ORIGINALS / name
-        if web.exists() and orig.exists():
+        web, orig = HERE / name, original_of(slot, rows)
+        if web.exists() and orig:
             ws, os_ = Image.open(web).size, ImageOps.exif_transpose(Image.open(orig)).size
             if not aspect_matches(ws, os_):
                 errors.append(f"{slot}: web copy {ws} has a different shape from original "
-                              f"{os_} — cropped or distorted")
-    pair_src = ORIGINALS / EXTRA_ORIGINALS[0]
-    panels = [ORIGINALS / SLOTS[s] for s in PAIR]
-    if pair_src.exists() and all(p.exists() for p in panels):
-        sw, sh = Image.open(pair_src).size
-        (lw, lh), (rw, rh) = (Image.open(p).size for p in panels)
-        if lh != sh or rh != sh:
-            errors.append(f"pair: panel heights ({lh}, {rh}) differ from pair-original "
-                          f"height ({sh}) — panels were cropped top or bottom")
-        gap = sw - lw - rw
-        if gap < 0:
-            errors.append(f"pair: panels are wider together ({lw}+{rw}) than pair-original ({sw})")
-        elif gap > sw * 0.02:
-            errors.append(f"pair: {gap}px of pair-original is in neither panel — "
-                          "more than a centre divider; possible crop")
-        else:
-            notes.append(f"pair: panels cover pair-original except a {gap}px centre divider")
-    elif not pair_src.exists():
-        notes.append("pair: pair-original.jpg not supplied yet, so the panel split can't be checked")
+                              f"{orig.name} {os_} — cropped or distorted")
+            else:
+                notes.append(f"{slot}: web copy {ws[0]}x{ws[1]} has the same shape as "
+                             f"{orig.name} {os_[0]}x{os_[1]} — not cropped")
     for slot, r in rows.items():
         name = SLOTS[slot]
         source = r["source"].strip("`")
@@ -260,16 +261,17 @@ def cmd_check():
         if source == "DESIGN ARTWORK" and "packet" in r["pages"].lower():
             warnings.append(f"{slot}: DESIGN ARTWORK listed for a Sample Packet page — "
                             "allowed only if that page is outside the packet itself")
-        web, orig = HERE / name, ORIGINALS / name
+        web, orig = HERE / name, original_of(slot, rows)
         if web.exists():
             w, _ = Image.open(web).size
             if w > MAX_WIDTH:
                 errors.append(f"{slot}: web copy is {w}px wide (max {MAX_WIDTH})")
             if web.stat().st_size >= MAX_BYTES:
                 errors.append(f"{slot}: web copy is {web.stat().st_size} bytes (max {MAX_BYTES - 1})")
-            if not orig.exists():
-                errors.append(f"{slot}: web copy has no original in originals/")
-        pending = [k for k in ("source", "caption", "alt", "pages") if r[k] == "PENDING"]
+            if not orig:
+                errors.append(f"{slot}: web copy has no original named in MANIFEST.md / originals/")
+        pending = [k for k in ("source", "caption", "alt", "pages")
+                   if r[k] == "PENDING" or r[k].startswith("DRAFT")]
         if r["status"] == "Ready":
             if pending:
                 errors.append(f"{slot}: marked Ready but PENDING: {', '.join(pending)}")
@@ -277,7 +279,7 @@ def cmd_check():
                 errors.append(f"{slot}: marked Ready but {name} does not exist")
         else:
             why = [f"PENDING: {', '.join(pending)}"] if pending else []
-            if not orig.exists():
+            if not orig:
                 why.append("original not supplied yet")
             notes.append(f"{slot}: not usable yet ({'; '.join(why) or r['status']})")
     if all(s in rows for s in PAIR):
