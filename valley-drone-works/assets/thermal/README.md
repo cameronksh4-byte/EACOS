@@ -5,8 +5,9 @@ website may show. Each image the site uses must have a row in
 [`MANIFEST.md`](MANIFEST.md). If an image has no row, or its row still says
 `PENDING`, the site must not use it.
 
-**This is a portable staging folder.** It sits at the root of the EACOS repo
-for now, but EACOS is *not* confirmed as the Valley Drone Works site and is not
+**This is a portable staging folder.** It sits inside the `valley-drone-works/`
+site root folder, which lives in the EACOS repo for now. EACOS is *not*
+confirmed as the Valley Drone Works site and is not
 the live site. When the real site repo is confirmed, the whole folder moves
 there as one unit. Nothing in it depends on EACOS.
 
@@ -75,13 +76,13 @@ never use DESIGN ARTWORK photos.
 
 ```bash
 # 1. Copy the supplied folder in. Every supplied file is stored untouched in originals/.
-python3 assets/thermal/process.py import path/to/valley-drone-works/assets-thermal
+python3 valley-drone-works/assets/thermal/process.py import path/to/valley-drone-works/assets-thermal
 
 # 2. Fill in alt text in MANIFEST.md, then set Status to Ready
 
 # 3. Check the folder against the rules (run again after any change)
-python3 assets/thermal/process.py check
+python3 valley-drone-works/assets/thermal/process.py check
 ```
 
 To rebuild web copies from `originals/` (for example after moving the folder),
-run `python3 assets/thermal/process.py build`.
+run `python3 valley-drone-works/assets/thermal/process.py build`.
